@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reading Assistant</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Reading Assistant</h1>
+      <p id="server-status" class="hint">Connecting…</p>
+    </header>
+
+    <section id="load-panel">
+      <p class="hint">Upload a book to save it locally, auto-rewrite with progress, and reopen anytime.</p>
+      <div id="library-section">
+        <h2 class="section-title">Your library</h2>
+        <ul id="library-list" class="library-list"></ul>
+        <div class="library-actions">
+          <button type="button" id="btn-open-book" class="btn-secondary">Open selected</button>
+          <button type="button" id="btn-refresh-library" class="btn-ghost">Refresh</button>
+        </div>
+      </div>
+      <div id="rewrite-overlay" class="rewrite-overlay hidden">
+        <div class="rewrite-box">
+          <h2 id="rewrite-title">Rewriting book…</h2>
+          <progress id="rewrite-progress" max="100" value="0"></progress>
+          <p id="rewrite-label">0 / 0 sentences</p>
+        </div>
+      </div>
+      <div class="tabs">
+        <button type="button" class="tab active" data-tab="paste">Paste</button>
+        <button type="button" class="tab" data-tab="file">Upload file</button>
+      </div>
+      <div id="tab-paste" class="tab-panel">
+        <textarea id="paste-text" rows="10" placeholder="Paste English text here…"></textarea>
+        <button type="button" id="btn-load-paste" class="btn-primary">Start reading</button>
+      </div>
+      <div id="tab-file" class="tab-panel hidden">
+        <input type="file" id="file-input" accept=".txt,.epub,.pdf,.mobi,text/plain" />
+        <button type="button" id="btn-load-file" class="btn-primary">Add to library &amp; rewrite</button>
+      </div>
+      <p id="load-error" class="error hidden"></p>
+    </section>
+
+    <section id="reader-panel" class="hidden">
+      <div class="meta">
+        <span id="progress">1 / 1</span>
+        <span id="level-badge">Original</span>
+      </div>
+      <div class="font-size-bar">
+        <span class="font-size-label">Text size</span>
+        <button type="button" id="font-smaller" class="btn-ghost" title="Smaller">A−</button>
+        <input type="range" id="font-slider" min="16" max="180" step="1" value="22" />
+        <button type="button" id="font-larger" class="btn-ghost" title="Larger">A+</button>
+        <span id="font-size-value">22px</span>
+      </div>
+      <div id="prep-status-bar" class="prep-status-bar">
+        <div id="prep-spinner" class="prep-spinner hidden"></div>
+        <span id="prep-status-text">Starting…</span>
+      </div>
+      <div class="reader-scroll">
+        <div id="compare-panel" class="compare-panel hidden">
+          <p id="previous-label" class="compare-label"></p>
+          <p id="previous-text" class="compare-text"></p>
+        </div>
+        <p class="compare-label now-label">Now reading</p>
+        <article id="sentence" tabindex="0"></article>
+      </div>
+      <p id="status" class="status hidden"></p>
+      <div class="reader-actions">
+        <button type="button" id="btn-prev" class="btn-secondary">← Prev</button>
+        <button type="button" id="btn-harder" class="btn-secondary">↑ Harder</button>
+        <button type="button" id="btn-simplify" class="btn-primary">↓ Simpler</button>
+        <button type="button" id="btn-next" class="btn-secondary">Next →</button>
+      </div>
+      <div class="export-actions">
+        <button type="button" id="btn-dl-original" class="btn-ghost">Download original</button>
+        <button type="button" id="btn-dl-rewritten" class="btn-ghost">Download rewritten</button>
+        <button type="button" id="btn-new" class="btn-ghost">New text</button>
+      </div>
+      <p class="keys">↓ Simpler · ↑ Harder · → Next · ← Prev</p>
+      <p id="reader-error" class="error hidden"></p>
+    </section>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
