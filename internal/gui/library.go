@@ -9,6 +9,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 
 	"reading-assistant/internal/library"
 	"reading-assistant/internal/parser"
@@ -29,19 +30,21 @@ func (u *readerUI) refreshLibraryList() {
 	books, err := u.lib.List()
 	u.libraryItems = nil
 	u.libraryIDs = nil
-	if err != nil {
-		u.libraryItems = []string{"(could not load library)"}
-	} else if len(books) == 0 {
-		u.libraryItems = []string{"(no saved books — upload a file below)"}
-	} else {
+	u.selectedLibrary = -1
+	if u.libraryStatus != nil {
+		if err != nil {
+			u.libraryStatus.SetText("Could not load library: " + err.Error())
+		} else if len(books) == 0 {
+			u.libraryStatus.SetText("No saved books — upload a file below.")
+		} else {
+			u.libraryStatus.SetText("")
+		}
+	}
+	if err == nil && len(books) > 0 {
 		u.libraryItems = make([]string, len(books))
 		u.libraryIDs = make([]string, len(books))
 		for i, b := range books {
-			status := b.RewriteStatus
-			if status == library.StatusRewriting {
-				status = fmt.Sprintf("rewriting %d/%d", b.RewriteDone, b.TotalSentences)
-			}
-			u.libraryItems[i] = fmt.Sprintf("%s — %s", b.Title, status)
+			u.libraryItems[i] = library.ListEntry(b)
 			u.libraryIDs[i] = b.ID
 		}
 	}
@@ -219,6 +222,39 @@ func (u *readerUI) flushLibraryToDisk() {
 		return
 	}
 	_ = u.lib.PersistPrepared(u.bookID, u.sess.PreparedSnapshot())
+}
+
+func (u *readerUI) selectedLibraryBookID() string {
+	if u.selectedLibrary < 0 || u.selectedLibrary >= len(u.libraryIDs) {
+		return ""
+	}
+	return u.libraryIDs[u.selectedLibrary]
+}
+
+func (u *readerUI) exportLibraryHTML(bookID string) {
+	if bookID == "" {
+		dialog.ShowInformation("Export HTML", "Select a book from the library first.", u.window)
+		return
+	}
+	name, data, err := u.lib.HTMLExport(bookID)
+	if err != nil {
+		u.showErr(err)
+		return
+	}
+	fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
+		if err != nil || w == nil {
+			return
+		}
+		defer w.Close()
+		if _, err := w.Write(data); err != nil {
+			u.showErr(err)
+			return
+		}
+		u.status.SetText("Exported HTML:\n" + w.URI().Path())
+	}, u.window)
+	fd.SetFileName(name)
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{".html"}))
+	fd.Show()
 }
 
 func (u *readerUI) importFileFromReader(name string, r io.Reader) ([]byte, string, error) {

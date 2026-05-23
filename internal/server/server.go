@@ -162,9 +162,44 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := strings.TrimPrefix(r.URL.Path, "/api/export/")
 	switch kind {
-	case "original", "rewritten":
+	case "original", "rewritten", "html":
 	default:
-		http.Error(w, "use /api/export/original or /api/export/rewritten", http.StatusBadRequest)
+		http.Error(w, "use /api/export/original, /api/export/rewritten, or /api/export/html", http.StatusBadRequest)
+		return
+	}
+	if kind == "html" {
+		if bookID := sess.BookIDValue(); bookID != "" {
+			name, data, err := s.library.HTMLExport(bookID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+			_, _ = w.Write(data)
+			return
+		}
+		_, filename := sess.Source()
+		base := save.BaseName(filename)
+		if base == "" {
+			base = "paste"
+		}
+		v := sess.View()
+		data, err := save.BuildBookHTML(save.ReaderExport{
+			Title:      base,
+			StartIndex: v.Index,
+			StartLevel: v.Level,
+			MaxLevel:   session.MaxLevel,
+			Sentences:  save.BuildReaderSentences(sess.Sentences, sess.PreparedSnapshot(), session.MaxLevel),
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		name := save.SafeFilename(base) + ".html"
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+		_, _ = w.Write(data)
 		return
 	}
 	_, filename := sess.Source()

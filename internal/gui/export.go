@@ -6,6 +6,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/storage"
 
 	"reading-assistant/internal/save"
 	"reading-assistant/internal/session"
@@ -61,6 +62,42 @@ func (u *readerUI) saveOnLoad() {
 		return
 	}
 	u.status.SetText("Saved original:\n" + path)
+}
+
+func (u *readerUI) exportSessionHTML() {
+	if u.sess == nil {
+		return
+	}
+	_, filename := u.sess.Source()
+	title := save.BaseName(filename)
+	if title == "" {
+		title = "paste"
+	}
+	v := u.sess.View()
+	data, err := save.BuildBookHTML(save.ReaderExport{
+		Title:      title,
+		StartIndex: v.Index,
+		StartLevel: v.Level,
+		MaxLevel:   session.MaxLevel,
+		Sentences:  save.BuildReaderSentences(u.sess.Sentences, u.sess.PreparedSnapshot(), session.MaxLevel),
+	})
+	if err != nil {
+		u.showErr(err)
+		return
+	}
+	name := save.SafeFilename(title) + ".html"
+	fd := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
+		if err != nil || w == nil {
+			return
+		}
+		defer w.Close()
+		if _, err := w.Write(data); err != nil {
+			u.showErr(err)
+		}
+	}, u.window)
+	fd.SetFileName(name)
+	fd.SetFilter(storage.NewExtensionFileFilter([]string{".html"}))
+	fd.Show()
 }
 
 func (u *readerUI) saveRewriteDialog() {

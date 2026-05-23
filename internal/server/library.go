@@ -19,29 +19,51 @@ import (
 
 func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/library")
+	path = strings.TrimPrefix(path, "/")
 	switch {
-	case path == "" || path == "/":
+	case path == "":
 		if r.Method == http.MethodGet {
 			s.handleLibraryList(w, r)
 			return
 		}
-	case path == "/import":
+	case path == "import":
 		if r.Method == http.MethodPost {
 			s.handleLibraryImport(w, r)
 			return
 		}
-	case path == "/open":
+	case path == "open":
 		if r.Method == http.MethodPost {
 			s.handleLibraryOpen(w, r)
 			return
 		}
-	case strings.HasPrefix(path, "/book"):
+	case path == "book" || strings.HasPrefix(path, "book/"):
 		if r.Method == http.MethodGet {
 			s.handleLibraryBook(w, r)
 			return
 		}
+	case path == "export":
+		if r.Method == http.MethodGet {
+			s.handleLibraryExport(w, r)
+			return
+		}
 	}
 	http.Error(w, "not found", http.StatusNotFound)
+}
+
+func (s *Server) handleLibraryExport(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id query required", http.StatusBadRequest)
+		return
+	}
+	name, data, err := s.library.HTMLExport(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleLibraryList(w http.ResponseWriter, r *http.Request) {

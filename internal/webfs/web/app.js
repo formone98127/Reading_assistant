@@ -3,6 +3,7 @@ let busy = false;
 let sourceFilename = "paste";
 let libraryBooks = [];
 let selectedBookId = null;
+let currentBookId = null;
 let rewritePollTimer = null;
 
 const FONT_MIN = 16;
@@ -11,6 +12,26 @@ const FONT_DEFAULT = 22;
 let readerFontSize = FONT_DEFAULT;
 
 const $ = (id) => document.getElementById(id);
+
+function bindClick(id, handler) {
+  const el = $(id);
+  if (el) el.addEventListener("click", handler);
+}
+
+function libraryStatusLabel(b) {
+  switch (b.rewriteStatus) {
+    case "rewriting":
+      return `rewriting ${b.rewriteDone}/${b.totalSentences}`;
+    case "done":
+      return "ready";
+    case "pending":
+      return "queued";
+    case "error":
+      return "rewrite paused";
+    default:
+      return b.rewriteStatus || "unknown";
+  }
+}
 
 function applyFontSize(px) {
   readerFontSize = Math.min(FONT_MAX, Math.max(FONT_MIN, px));
@@ -83,16 +104,13 @@ function renderState(state) {
   renderPrepBar(state);
   $("sentence").textContent = state.sentence;
   const compare = $("compare-panel");
-  if (state.previous) {
-    const label =
-      state.previousLevel === 0
-        ? "Previous (original)"
-        : `Previous (level ${state.previousLevel})`;
-    $("previous-label").textContent = label;
-    $("previous-text").textContent = state.previous;
+  if (state.level > 0 && state.original) {
+    $("previous-text").textContent = state.original;
     compare.classList.remove("hidden");
+    compare.setAttribute("aria-hidden", "false");
   } else {
     compare.classList.add("hidden");
+    compare.setAttribute("aria-hidden", "true");
   }
   if (!state.canSimplify) {
     $("btn-simplify").disabled = true;
@@ -135,23 +153,32 @@ async function startPaste() {
 }
 
 async function refreshLibrary() {
+  const ul = $("library-list");
+  const hint = $("library-status");
   try {
-    const data = await api("/api/library");
-    libraryBooks = data.books || [];
-    const ul = $("library-list");
+    const res = await fetch("/api/library");
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(t || res.statusText);
+    }
+    const data = await res.json();
+    libraryBooks = Array.isArray(data.books) ? data.books : [];
     ul.innerHTML = "";
+    selectedBookId = null;
+    if (hint) hint.textContent = "";
     if (!libraryBooks.length) {
       ul.innerHTML = "<li class='library-empty'>No saved books — upload a file below.</li>";
       return;
     }
     libraryBooks.forEach((b) => {
       const li = document.createElement("li");
-      let status = b.rewriteStatus;
-      if (status === "rewriting") {
-        status = `rewriting ${b.rewriteDone}/${b.totalSentences}`;
-      }
-      li.textContent = `${b.title} — ${status}`;
+      const title = b.title || "Untitled";
+      li.textContent = `${title} — ${libraryStatusLabel(b)}`;
       li.dataset.id = b.id;
+      li.title =
+        b.rewriteStatus === "error" && b.rewriteError
+          ? b.rewriteError
+          : "";
       li.addEventListener("click", () => {
         selectedBookId = b.id;
         ul.querySelectorAll("li").forEach((el) => el.classList.remove("selected"));
@@ -160,7 +187,12 @@ async function refreshLibrary() {
       ul.appendChild(li);
     });
   } catch (e) {
-    $("library-list").innerHTML = "<li class='library-empty'>Could not load library.</li>";
+    libraryBooks = [];
+    selectedBookId = null;
+    ul.innerHTML = "";
+    if (hint) hint.textContent = "";
+    const msg = e && e.message ? e.message : String(e);
+    ul.innerHTML = `<li class='library-empty'>Could not load library: ${msg}</li>`;
   }
 }
 
@@ -287,6 +319,7 @@ function pollUntilReady() {
 
 function beginSession(data) {
   sessionId = data.sessionId;
+  currentBookId = data.bookId || null;
   sourceFilename = data.sourceFilename || "paste";
   $("load-panel").classList.add("hidden");
   $("reader-panel").classList.remove("hidden");
@@ -316,6 +349,7 @@ function saveProgressBeacon(closeRewrite = false) {
 function newSession() {
   saveProgressBeacon(true);
   sessionId = null;
+  currentBookId = null;
   busy = false;
   $("reader-panel").classList.add("hidden");
   $("load-panel").classList.remove("hidden");
@@ -323,21 +357,38 @@ function newSession() {
   refreshLibrary();
 }
 
+async function downloadBlob(res, fallbackName) {
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+  const blob = await res.blob();
+  const disp = res.headers.get("Content-Disposition") || "";
+  const m = /filename="([^"]+)"/i.exec(disp);
+  const name = m ? m[1] : fallbackName;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 async function downloadExport(kind) {
   if (!sessionId) return;
   const res = await fetch(`/api/export/${kind}`, {
     headers: { "X-Session-Id": sessionId },
   });
-  if (!res.ok) {
-    throw new Error(await res.text());
-  }
-  const blob = await res.blob();
   const base = sourceFilename.replace(/\.[^.]+$/, "") || "paste";
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${base}.${kind}.txt`;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  const fallback = kind === "html" ? `${base}.html` : `${base}.${kind}.txt`;
+  await downloadBlob(res, fallback);
+}
+
+async function exportLibraryHTML(bookId) {
+  const id = bookId || selectedBookId;
+  if (!id) {
+    throw new Error("Select a book from the library.");
+  }
+  const res = await fetch(`/api/library/export?id=${encodeURIComponent(id)}`);
+  await downloadBlob(res, "book.html");
 }
 
 async function easier() {
@@ -449,25 +500,34 @@ document.querySelectorAll(".tab").forEach((btn) => {
   });
 });
 
-$("btn-load-paste").addEventListener("click", () =>
+bindClick("btn-load-paste", () =>
   startPaste().catch((e) => showError($("load-error"), friendlyError(e)))
 );
-$("btn-load-file").addEventListener("click", () =>
+bindClick("btn-load-file", () =>
   startFile().catch((e) => showError($("load-error"), friendlyError(e)))
 );
-$("btn-open-book").addEventListener("click", () => openSelectedBook());
-$("btn-refresh-library").addEventListener("click", () => refreshLibrary());
-$("btn-simplify").addEventListener("click", () => easier());
-$("btn-harder").addEventListener("click", () => harder());
-$("btn-next").addEventListener("click", () => nextSentence());
-$("btn-prev").addEventListener("click", () => prevSentence());
-$("btn-dl-original").addEventListener("click", () =>
+bindClick("btn-open-book", () => openSelectedBook());
+bindClick("btn-export-html", () =>
+  exportLibraryHTML().catch((e) => showError($("load-error"), friendlyError(e)))
+);
+bindClick("btn-refresh-library", () => refreshLibrary());
+bindClick("btn-simplify", () => easier());
+bindClick("btn-harder", () => harder());
+bindClick("btn-next", () => nextSentence());
+bindClick("btn-prev", () => prevSentence());
+bindClick("btn-dl-original", () =>
   downloadExport("original").catch((e) => showError($("reader-error"), friendlyError(e)))
 );
-$("btn-dl-rewritten").addEventListener("click", () =>
+bindClick("btn-dl-rewritten", () =>
   downloadExport("rewritten").catch((e) => showError($("reader-error"), friendlyError(e)))
 );
-$("btn-new").addEventListener("click", () => newSession());
+bindClick("btn-dl-html", () => {
+  const run = currentBookId
+    ? exportLibraryHTML(currentBookId)
+    : downloadExport("html");
+  run.catch((e) => showError($("reader-error"), friendlyError(e)));
+});
+bindClick("btn-new", () => newSession());
 
 window.addEventListener("keydown", onReaderKey, true);
 window.addEventListener("beforeunload", () => saveProgressBeacon(true));

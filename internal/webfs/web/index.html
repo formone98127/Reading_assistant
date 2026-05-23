@@ -17,9 +17,11 @@
       <p class="hint">Upload a book to save it locally, auto-rewrite with progress, and reopen anytime.</p>
       <div id="library-section">
         <h2 class="section-title">Your library</h2>
+        <p id="library-status" class="hint library-status"></p>
         <ul id="library-list" class="library-list"></ul>
         <div class="library-actions">
           <button type="button" id="btn-open-book" class="btn-secondary">Open selected</button>
+          <button type="button" id="btn-export-html" class="btn-ghost">Export HTML</button>
           <button type="button" id="btn-refresh-library" class="btn-ghost">Refresh</button>
         </div>
       </div>
@@ -62,12 +64,14 @@
         <span id="prep-status-text">Starting…</span>
       </div>
       <div class="reader-scroll">
-        <div id="compare-panel" class="compare-panel hidden">
-          <p id="previous-label" class="compare-label"></p>
+        <div class="reading-primary">
+          <p class="compare-label now-label">Now reading</p>
+          <article id="sentence" tabindex="0"></article>
+        </div>
+        <div id="compare-panel" class="compare-panel hidden" aria-hidden="true">
+          <p class="compare-label">Original</p>
           <p id="previous-text" class="compare-text"></p>
         </div>
-        <p class="compare-label now-label">Now reading</p>
-        <article id="sentence" tabindex="0"></article>
       </div>
       <p id="status" class="status hidden"></p>
       <div class="reader-actions">
@@ -79,6 +83,7 @@
       <div class="export-actions">
         <button type="button" id="btn-dl-original" class="btn-ghost">Download original</button>
         <button type="button" id="btn-dl-rewritten" class="btn-ghost">Download rewritten</button>
+        <button type="button" id="btn-dl-html" class="btn-ghost">Export HTML</button>
         <button type="button" id="btn-new" class="btn-ghost">New text</button>
       </div>
       <p class="keys">↓ Simpler · ↑ Harder · → Next · ← Prev</p>

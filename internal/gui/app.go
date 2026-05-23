@@ -97,6 +97,7 @@ type readerUI struct {
 	rewriteCancel     context.CancelFunc
 	activeRewriteBook string
 	libraryList       *widget.List
+	libraryStatus     *widget.Label
 	libraryRewriteBar *widget.ProgressBar
 	libraryItems     []string
 	libraryIDs       []string
@@ -126,7 +127,10 @@ func (u *readerUI) build() {
 	u.libraryList.OnSelected = func(id widget.ListItemID) {
 		u.selectedLibrary = int(id)
 	}
+	u.libraryStatus = widget.NewLabel("")
+	u.libraryStatus.Wrapping = fyne.TextWrapWord
 	openLibBtn := widget.NewButton("Open saved book", func() { u.openSelectedLibraryBook() })
+	exportHTMLBtn := widget.NewButton("Export HTML…", func() { u.exportLibraryHTML(u.selectedLibraryBookID()) })
 	refreshLibBtn := widget.NewButton("Refresh", func() { u.refreshLibraryList() })
 
 	u.loadCard = container.NewVBox(
@@ -135,8 +139,9 @@ func (u *readerUI) build() {
 		widget.NewLabel("Ctrl+Enter start · Ctrl+O open file"),
 		widget.NewSeparator(),
 		widget.NewLabel("Your library"),
-		u.libraryList,
-		container.NewHBox(openLibBtn, refreshLibBtn),
+		u.libraryStatus,
+		container.NewScroll(u.libraryList),
+		container.NewHBox(openLibBtn, exportHTMLBtn, refreshLibBtn),
 		widget.NewSeparator(),
 		widget.NewLabel("Paste"),
 		u.pasteEntry,
@@ -151,7 +156,7 @@ func (u *readerUI) build() {
 	u.sentenceRT.Wrapping = fyne.TextWrapWord
 	u.sentenceScaled = newScaledTheme(u.textSize)
 	u.sentenceWrap = container.NewThemeOverride(u.sentenceRT, u.sentenceScaled)
-	u.previousLabel = widget.NewLabel("")
+	u.previousLabel = widget.NewLabel("Original")
 	u.previousLabel.TextStyle = fyne.TextStyle{Italic: true}
 	u.previousRT = widget.NewRichText()
 	u.previousRT.Wrapping = fyne.TextWrapWord
@@ -175,6 +180,13 @@ func (u *readerUI) build() {
 	harderBtn := widget.NewButton("↑ Harder level", func() { u.harder() })
 	simplerBtn := widget.NewButton("↓ Simpler", func() { u.easier() })
 	saveBtn := widget.NewButton("Save", func() { u.saveRewriteDialog() })
+	exportHTMLReaderBtn := widget.NewButton("Export HTML…", func() {
+		if u.bookID != "" {
+			u.exportLibraryHTML(u.bookID)
+			return
+		}
+		u.exportSessionHTML()
+	})
 
 	nowLabel := widget.NewLabel("Now reading")
 	nowLabel.TextStyle = fyne.TextStyle{Bold: true}
@@ -208,9 +220,9 @@ func (u *readerUI) build() {
 	)
 
 	readingContent := container.NewVBox(
-		u.compareBox,
 		nowLabel,
 		sentencePanel,
+		u.compareBox,
 	)
 	u.readingScroll = container.NewVScroll(readingContent)
 
@@ -221,7 +233,7 @@ func (u *readerUI) build() {
 	)
 	bottomBar := container.NewVBox(
 		u.status,
-		container.NewHBox(prevBtn, harderBtn, simplerBtn, nextBtn, layout.NewSpacer(), saveBtn),
+		container.NewHBox(prevBtn, harderBtn, simplerBtn, nextBtn, layout.NewSpacer(), saveBtn, exportHTMLReaderBtn),
 		u.hint,
 	)
 	u.readerCard = container.NewBorder(topBar, bottomBar, nil, nil, u.readingScroll)
@@ -400,15 +412,14 @@ func (u *readerUI) applyViewText(v session.View) {
 	if u.readingScroll != nil {
 		u.readingScroll.Refresh()
 	}
-	if v.Previous != "" {
-		u.previousLabel.SetText(compareHeading(v.PreviousLevel))
+	if v.Level > 0 && v.Original != "" {
 		prevSize := u.textSize - 4
 		if prevSize < fontSizeMin {
 			prevSize = fontSizeMin
 		}
 		u.previousScaled.setSize(prevSize)
 		u.previousWrap.Refresh()
-		setRichText(u.previousRT, v.Previous, false, false)
+		setRichText(u.previousRT, v.Original, false, false)
 		u.compareBox.Show()
 	} else {
 		u.compareBox.Hide()
@@ -438,13 +449,6 @@ func (u *readerUI) renderPrepBar(v session.View) {
 			u.prepBar.Hide()
 		}
 	}
-}
-
-func compareHeading(prevLevel int) string {
-	if prevLevel == 0 {
-		return "Previous (original)"
-	}
-	return fmt.Sprintf("Previous (level %d)", prevLevel)
 }
 
 func levelLabel(level int) string {
