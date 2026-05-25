@@ -1,18 +1,28 @@
 package library
 
-// PersistPrepared merges in-memory levels into the bundle, updates book.rewritten.txt,
-// and records rewrite progress so RewriteAll can resume after reopen.
-func (s *Store) PersistPrepared(id string, fromSession map[int]map[int]string) error {
+import "strings"
+
+// PersistPrepared merges English into english.json and 中文 into chinese.json.
+func (s *Store) PersistPrepared(id string, english map[int]map[int]string, chinese map[int]string) error {
 	prepared, err := s.LoadPrepared(id)
 	if err != nil {
 		return err
 	}
-	for idx, levels := range fromSession {
+	for idx, levels := range english {
 		if len(levels) == 0 {
 			continue
 		}
-		prepared[idx] = levels
+		prepared.English[idx] = levels
 		if err := s.SaveSentenceLevels(id, idx, levels); err != nil {
+			return err
+		}
+	}
+	for idx, text := range chinese {
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		prepared.Chinese[idx] = text
+		if err := s.SaveChinese(id, idx, text); err != nil {
 			return err
 		}
 	}
@@ -23,22 +33,13 @@ func (s *Store) PersistPrepared(id string, fromSession map[int]map[int]string) e
 	if err := s.SaveRewrittenFile(id, sentences, prepared); err != nil {
 		return err
 	}
-	done := contiguousRewriteDone(prepared, len(sentences))
+	total := len(sentences)
+	done := contiguousEnglishDone(prepared, total)
 	status := StatusRewriting
-	if done >= len(sentences) {
+	if RewriteComplete(prepared, total) {
 		status = StatusDone
+		done = total
 	}
-	return s.SetRewriteProgress(id, done, len(sentences), status, "")
-}
-
-func contiguousRewriteDone(prepared map[int]map[int]string, total int) int {
-	done := 0
-	for i := 0; i < total; i++ {
-		levels, ok := prepared[i]
-		if !ok || len(levels) < 1 {
-			break
-		}
-		done = i + 1
-	}
-	return done
+	_ = s.SetChineseProgress(id, contiguousChineseDone(prepared, total))
+	return s.SetRewriteProgress(id, done, total, status, "")
 }

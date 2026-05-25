@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"reading-assistant/internal/save"
+	"reading-assistant/internal/session"
 )
 
 const (
@@ -32,10 +33,13 @@ type Meta struct {
 	RewriteStatus  string    `json:"rewriteStatus"`
 	RewriteError   string    `json:"rewriteError,omitempty"`
 	ReadIndex      int       `json:"readIndex"`
-	ReadLevel      int       `json:"readLevel"`
+	ReadLevel           int       `json:"readLevel"`
+	ReadingMode         string    `json:"readingMode,omitempty"`
+	ChineseRewriteDone  int       `json:"chineseRewriteDone,omitempty"`
 }
 
 // Store manages the on-disk book library.
+// English easier levels: english.json. 繁體 中文: chinese.json (separate files).
 type Store struct {
 	Root string
 }
@@ -61,7 +65,7 @@ func newID() string {
 }
 
 // Import saves a new book bundle (source file + sentences).
-func (s *Store) Import(title, sourceFilename string, sourceData []byte, sentences []string) (*Meta, error) {
+func (s *Store) Import(title, sourceFilename string, sourceData []byte, sentences []string, readingMode string) (*Meta, error) {
 	if len(sentences) == 0 {
 		return nil, fmt.Errorf("no sentences")
 	}
@@ -81,7 +85,10 @@ func (s *Store) Import(title, sourceFilename string, sourceData []byte, sentence
 	if err := writeJSON(filepath.Join(dir, "sentences.json"), sentences); err != nil {
 		return nil, err
 	}
-	if err := writeJSON(filepath.Join(dir, "levels.json"), map[string]map[string]string{}); err != nil {
+	if err := writeJSON(filepath.Join(dir, englishLevelsFile), map[string]map[string]string{}); err != nil {
+		return nil, err
+	}
+	if err := writeJSON(filepath.Join(dir, chineseFile), map[string]string{}); err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
@@ -93,6 +100,7 @@ func (s *Store) Import(title, sourceFilename string, sourceData []byte, sentence
 		UpdatedAt:      now,
 		TotalSentences: len(sentences),
 		RewriteStatus:  StatusPending,
+		ReadingMode: session.NormalizeReadingMode(readingMode),
 	}
 	if err := s.saveMeta(meta); err != nil {
 		return nil, err
@@ -161,49 +169,54 @@ func (s *Store) LoadSentences(id string) ([]string, error) {
 	return sentences, nil
 }
 
-// LoadPrepared returns cached simplify levels per sentence index.
-func (s *Store) LoadPrepared(id string) (map[int]map[int]string, error) {
-	raw := map[string]map[string]string{}
-	if err := readJSON(filepath.Join(s.bookDir(id), "levels.json"), &raw); err != nil {
-		if os.IsNotExist(err) {
-			return map[int]map[int]string{}, nil
-		}
-		return nil, err
+// LoadPrepared returns English (english.json) and 中文 (chinese.json).
+func (s *Store) LoadPrepared(id string) (PreparedData, error) {
+	_ = s.migrateLegacyLevels(id)
+	english, err := s.loadEnglishLevels(id)
+	if err != nil {
+		return PreparedData{}, err
 	}
-	out := make(map[int]map[int]string, len(raw))
-	for k, v := range raw {
-		var idx int
-		if _, err := fmt.Sscanf(k, "%d", &idx); err != nil {
-			continue
-		}
-		levels := make(map[int]string)
-		for lk, txt := range v {
-			var lv int
-			if _, err := fmt.Sscanf(lk, "%d", &lv); err == nil && txt != "" {
-				levels[lv] = txt
-			}
-		}
-		if len(levels) > 0 {
-			out[idx] = levels
-		}
+	chinese, err := s.loadChinese(id)
+	if err != nil {
+		return PreparedData{}, err
 	}
-	return out, nil
+	if english == nil {
+		english = map[int]map[int]string{}
+	}
+	if chinese == nil {
+		chinese = map[int]string{}
+	}
+	return PreparedData{English: english, Chinese: chinese}, nil
 }
 
 func (s *Store) SaveSentenceLevels(id string, idx int, levels map[int]string) error {
 	raw := map[string]map[string]string{}
-	path := filepath.Join(s.bookDir(id), "levels.json")
+	path := s.englishLevelsPath(id)
 	_ = readJSON(path, &raw)
 	key := fmt.Sprintf("%d", idx)
-	raw[key] = make(map[string]string)
+	out := make(map[string]string)
 	for lv, txt := range levels {
-		raw[key][fmt.Sprintf("%d", lv)] = txt
+		out[fmt.Sprintf("%d", lv)] = txt
+	}
+	raw[key] = out
+	return writeJSON(path, raw)
+}
+
+func (s *Store) SaveChinese(id string, idx int, text string) error {
+	raw := map[string]string{}
+	path := s.chinesePath(id)
+	_ = readJSON(path, &raw)
+	key := fmt.Sprintf("%d", idx)
+	if strings.TrimSpace(text) == "" {
+		delete(raw, key)
+	} else {
+		raw[key] = text
 	}
 	return writeJSON(path, raw)
 }
 
-func (s *Store) SaveRewrittenFile(id string, sentences []string, prepared map[int]map[int]string) error {
-	paras := rewrittenParagraphs(sentences, prepared)
+func (s *Store) SaveRewrittenFile(id string, sentences []string, prepared PreparedData) error {
+	paras := rewrittenParagraphs(sentences, prepared.English)
 	_, err := save.WriteRewritten(s.bookDir(id), "book", paras)
 	return err
 }
@@ -225,6 +238,27 @@ func rewrittenParagraphs(sentences []string, prepared map[int]map[int]string) []
 	return out
 }
 
+func (s *Store) SetReadingMode(id, mode string) error {
+	m, err := s.LoadMeta(id)
+	if err != nil {
+		return err
+	}
+	m.ReadingMode = session.NormalizeReadingMode(mode)
+	return s.saveMeta(m)
+}
+
+func (s *Store) SetChineseProgress(id string, done int) error {
+	m, err := s.LoadMeta(id)
+	if err != nil {
+		return err
+	}
+	m.ChineseRewriteDone = done
+	if m.TotalSentences > 0 && done < m.TotalSentences && m.RewriteDone >= m.TotalSentences {
+		m.RewriteStatus = StatusRewriting
+	}
+	return s.saveMeta(m)
+}
+
 func (s *Store) SetRewriteProgress(id string, done, total int, status, errMsg string) error {
 	m, err := s.LoadMeta(id)
 	if err != nil {
@@ -235,6 +269,28 @@ func (s *Store) SetRewriteProgress(id string, done, total int, status, errMsg st
 	m.RewriteStatus = status
 	m.RewriteError = errMsg
 	return s.saveMeta(m)
+}
+
+// Delete removes a book bundle from the library.
+func (s *Store) Delete(id string) error {
+	if err := validateBookID(id); err != nil {
+		return err
+	}
+	dir := s.bookDir(id)
+	if _, err := os.Stat(dir); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("book not found")
+		}
+		return err
+	}
+	return os.RemoveAll(dir)
+}
+
+func validateBookID(id string) error {
+	if id == "" || strings.Contains(id, "..") || strings.ContainsAny(id, `/\`) {
+		return fmt.Errorf("invalid book id")
+	}
+	return nil
 }
 
 func (s *Store) SaveReadPosition(id string, index, level int) error {

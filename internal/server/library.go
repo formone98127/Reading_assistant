@@ -46,6 +46,16 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 			s.handleLibraryExport(w, r)
 			return
 		}
+	case path == "publish":
+		if r.Method == http.MethodPost {
+			s.handleLibraryPublish(w, r)
+			return
+		}
+	case path == "delete":
+		if r.Method == http.MethodPost || r.Method == http.MethodDelete {
+			s.handleLibraryDelete(w, r)
+			return
+		}
 	}
 	http.Error(w, "not found", http.StatusNotFound)
 }
@@ -56,7 +66,7 @@ func (s *Server) handleLibraryExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id query required", http.StatusBadRequest)
 		return
 	}
-	name, data, err := s.library.HTMLExport(id)
+	name, data, err := s.library.HTMLExportBook(id, r.URL.Query().Get("mode"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -110,6 +120,7 @@ func (s *Server) handleLibraryOpen(w http.ResponseWriter, r *http.Request) {
 		"state":          s.enrichView(sess, sess.View()),
 		"bookId":         meta.ID,
 		"sourceFilename": meta.Title,
+		"readingMode":    meta.ReadingMode,
 	})
 }
 
@@ -142,15 +153,17 @@ func (s *Server) handleLibraryImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	title := save.BaseName(filename)
-	meta, err := s.library.Import(title, filename, data, parts)
+	mode := session.NormalizeReadingMode(r.FormValue("readingMode"))
+	meta, err := s.library.Import(title, filename, data, parts, mode)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.startLibraryRewrite(meta.ID)
 	writeJSON(w, map[string]any{
-		"book":    meta,
-		"openNow": true,
+		"book":        meta,
+		"openNow":     true,
+		"readingMode": meta.ReadingMode,
 	})
 }
 
@@ -171,9 +184,41 @@ func (s *Server) openLibrarySession(bookID string) (*session.Session, *library.M
 	sess := s.manager.Create(sid, parts)
 	sess.SetBookID(bookID)
 	sess.SetSource(s.library.Dir(bookID), meta.Title)
-	sess.SeedPrepared(prepared)
+	sess.SetReadingMode(meta.ReadingMode)
+	sess.SeedPrepared(prepared.English, prepared.Chinese)
 	sess.ApplyReadPosition(meta.ReadIndex, meta.ReadLevel)
 	return sess, meta, sid, nil
+}
+
+func (s *Server) cancelLibraryRewrite(bookID string) {
+	s.rewriteMu.Lock()
+	if cancel, ok := s.rewriteCancel[bookID]; ok {
+		cancel()
+		delete(s.rewriteCancel, bookID)
+	}
+	s.rewriteMu.Unlock()
+}
+
+func (s *Server) handleLibraryDelete(w http.ResponseWriter, r *http.Request) {
+	bookID := r.URL.Query().Get("id")
+	if bookID == "" {
+		var req struct {
+			BookID string `json:"bookId"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			bookID = req.BookID
+		}
+	}
+	if bookID == "" {
+		http.Error(w, "bookId required", http.StatusBadRequest)
+		return
+	}
+	s.cancelLibraryRewrite(bookID)
+	if err := s.library.Delete(bookID); err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "bookId": bookID})
 }
 
 func (s *Server) startLibraryRewrite(bookID string) {
@@ -204,6 +249,11 @@ func (s *Server) startLibraryRewrite(bookID string) {
 
 func (s *Server) ensureLibraryRewrite(meta *library.Meta) {
 	if meta.RewriteStatus == library.StatusDone {
+		prepared, err := s.library.LoadPrepared(meta.ID)
+		if err == nil && !library.RewriteComplete(prepared, meta.TotalSentences) {
+			s.startLibraryRewrite(meta.ID)
+			return
+		}
 		return
 	}
 	s.startLibraryRewrite(meta.ID)
@@ -215,14 +265,9 @@ func (s *Server) flushLibraryFromSession(sess *session.Session, stopRewrite bool
 		return
 	}
 	if stopRewrite {
-		s.rewriteMu.Lock()
-		if cancel, ok := s.rewriteCancel[bookID]; ok {
-			cancel()
-			delete(s.rewriteCancel, bookID)
-		}
-		s.rewriteMu.Unlock()
+		s.cancelLibraryRewrite(bookID)
 	}
-	_ = s.library.PersistPrepared(bookID, sess.PreparedSnapshot())
+	_ = s.library.PersistPrepared(bookID, sess.PreparedSnapshot(), sess.ChineseSnapshot())
 }
 
 func (s *Server) persistReadPosition(sess *session.Session) {

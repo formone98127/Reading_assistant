@@ -25,17 +25,21 @@ func (u *readerUI) bindKeys() {
 		return !u.readerCard.Visible()
 	}
 
+	// Match exported HTML reader: ↓ prev · ↑ next · ← harder · → simpler
 	for _, b := range []struct {
 		key fyne.KeyName
 		fn  func()
 	}{
-		{fyne.KeyDown, u.easier},
-		{fyne.KeyUp, u.harder},
-		{fyne.KeyRight, u.next},
-		{fyne.KeyLeft, u.prev},
+		{fyne.KeyDown, u.prev},
+		{fyne.KeyUp, u.next},
+		{fyne.KeyLeft, u.harder},
+		{fyne.KeyRight, u.easier},
 	} {
 		add(b.key, mod, whenReader, b.fn)
 	}
+
+	add(fyne.KeyEscape, fyne.KeyModifierNone, whenReader, u.exitReader)
+	add(fyne.KeyM, mod, whenReader, u.showReadingModeDialog)
 
 	add(fyne.KeyMinus, mod, func() bool { return u.readerCard.Visible() }, func() { u.adjustTextSize(-2) })
 	larger := func() { u.adjustTextSize(2) }

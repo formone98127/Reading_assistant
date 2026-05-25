@@ -5,6 +5,9 @@ let libraryBooks = [];
 let selectedBookId = null;
 let currentBookId = null;
 let rewritePollTimer = null;
+let readingMode = "english";
+let pendingReadAction = null;
+let lastReaderState = null;
 
 const FONT_MIN = 16;
 const FONT_MAX = 180;
@@ -18,11 +21,49 @@ function bindClick(id, handler) {
   if (el) el.addEventListener("click", handler);
 }
 
+function bookRewritePending(state) {
+  const t = state?.bookRewriteTotal || 0;
+  if (t <= 0) return false;
+  const eng = state.bookRewriteDone ?? 0;
+  const zh = state.bookChineseDone ?? 0;
+  return !!state.bookRewriteActive || eng < t || (eng >= t && zh < t);
+}
+
+function bookRewritePercent(state) {
+  const t = state?.bookRewriteTotal || 0;
+  if (!t) return 0;
+  const eng = state.bookRewriteDone ?? 0;
+  const zh = state.bookChineseDone ?? 0;
+  if (eng < t) return (100 * eng) / t;
+  if (zh < t) return (100 * zh) / t;
+  return 100;
+}
+
+function bookRewriteMessage(state) {
+  const t = state?.bookRewriteTotal || 0;
+  if (!t) return "";
+  const eng = state.bookRewriteDone ?? 0;
+  const zh = state.bookChineseDone ?? 0;
+  if (eng < t) return `english.json ${eng}/${t} — you can read now`;
+  if (zh < t) return `chinese.json ${zh}/${t} — you can read now`;
+  return "";
+}
+
 function libraryStatusLabel(b) {
+  if (
+    b.rewriteStatus === "rewriting" &&
+    b.rewriteDone >= b.totalSentences &&
+    b.chineseRewriteDone < b.totalSentences
+  ) {
+    return `chinese ${b.chineseRewriteDone}/${b.totalSentences}`;
+  }
   switch (b.rewriteStatus) {
     case "rewriting":
-      return `rewriting ${b.rewriteDone}/${b.totalSentences}`;
+      return `english ${b.rewriteDone}/${b.totalSentences}`;
     case "done":
+      if (b.chineseRewriteDone < b.totalSentences) {
+        return `chinese ${b.chineseRewriteDone}/${b.totalSentences}`;
+      }
       return "ready";
     case "pending":
       return "queued";
@@ -76,6 +117,7 @@ function showError(el, msg) {
 
 function setLoading(on, msg = "") {
   const el = $("status");
+  if (!el) return;
   if (on) {
     el.textContent = msg || "Working…";
     el.classList.remove("hidden");
@@ -93,33 +135,197 @@ function setLoading(on, msg = "") {
   $("sentence").classList.toggle("is-loading", on);
 }
 
-function levelLabel(level) {
-  if (level === 0) return "Original";
-  return `Easier · level ${level}/3`;
+function levelLabel(state) {
+  if (state.showChinese) {
+    return state.chineseVisible ? "Original + 中文" : "Original";
+  }
+  if (state.level === 0) return "Original";
+  return `Easier · level ${state.level}/3`;
+}
+
+function getReadingMode() {
+  return readingMode === "english_chinese" ? "english_chinese" : "english";
+}
+
+function setReadingMode(mode) {
+  readingMode = mode === "english_chinese" ? "english_chinese" : "english";
+  try {
+    localStorage.setItem("readingMode", readingMode);
+  } catch (_) {}
+  highlightOverlayMode(readingMode);
+}
+
+function highlightOverlayMode(mode) {
+  document.querySelectorAll(".html-mode-choice").forEach((btn) => {
+    btn.classList.toggle("selected", btn.dataset.mode === mode);
+  });
+}
+
+function modeOverlayOpen() {
+  const o = $("reading-mode-overlay");
+  return o && !o.classList.contains("hidden");
+}
+
+function showReadingModeOverlay(onConfirm, initialMode) {
+  pendingReadAction = onConfirm;
+  setReadingMode(initialMode || getReadingMode());
+  const overlay = $("reading-mode-overlay");
+  overlay.classList.remove("hidden");
+  overlay.focus();
+}
+
+function hideReadingModeOverlay(runAction) {
+  $("reading-mode-overlay").classList.add("hidden");
+  if (runAction && pendingReadAction) {
+    const fn = pendingReadAction;
+    pendingReadAction = null;
+    fn();
+  } else {
+    pendingReadAction = null;
+  }
+}
+
+function withReadingMode(action) {
+  showReadingModeOverlay(action, getReadingMode());
+}
+
+function onModeOverlayKey(e) {
+  if (!modeOverlayOpen()) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    hideReadingModeOverlay(false);
+    return;
+  }
+  if (e.key === "1") {
+    e.preventDefault();
+    setReadingMode("english");
+  }
+  if (e.key === "2") {
+    e.preventDefault();
+    setReadingMode("english_chinese");
+  }
+  if (e.key === "Enter") {
+    e.preventDefault();
+    hideReadingModeOverlay(true);
+  }
+}
+
+function initReadingMode() {
+  try {
+    const saved = localStorage.getItem("readingMode");
+    if (saved === "english_chinese" || saved === "english") readingMode = saved;
+  } catch (_) {}
+  highlightOverlayMode(readingMode);
+  document.querySelectorAll(".html-mode-choice").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      setReadingMode(btn.dataset.mode);
+      hideReadingModeOverlay(true);
+    });
+  });
+  $("reading-mode-overlay")?.addEventListener("keydown", onModeOverlayKey);
+}
+
+initReadingMode();
+
+function zhPendingMessage(state) {
+  if (!state.bookRewriteActive || !state.bookRewriteTotal) {
+    return "中文 not ready for this sentence yet";
+  }
+  const t = state.bookRewriteTotal;
+  const eng = state.bookRewriteDone ?? 0;
+  if (eng < t) {
+    return `english.json ${eng}/${t}, then chinese.json…`;
+  }
+  const zh = state.bookChineseDone ?? 0;
+  return `chinese.json ${zh}/${t}…`;
 }
 
 function renderState(state) {
+  if (state?.readingMode) {
+    setReadingMode(state.readingMode);
+  }
+  lastReaderState = state;
+
   $("progress").textContent = `${state.index + 1} / ${state.total}`;
-  $("level-badge").textContent = levelLabel(state.level);
-  renderPrepBar(state);
-  $("sentence").textContent = state.sentence;
-  const compare = $("compare-panel");
-  if (state.level > 0 && state.original) {
-    $("previous-text").textContent = state.original;
-    compare.classList.remove("hidden");
-    compare.setAttribute("aria-hidden", "false");
+  $("level-badge").textContent = levelLabel(state);
+  const modeBadge = $("reading-mode-badge");
+  if (state.showChinese) {
+    modeBadge.textContent = "EN + 中文";
+    modeBadge.classList.remove("hidden");
   } else {
+    modeBadge.textContent = "";
+    modeBadge.classList.add("hidden");
+  }
+  renderPrepBar(state);
+  const zhEl = $("chinese-text");
+  const nowLabel = $("now-reading-label");
+  const compare = $("compare-panel");
+  const compareLabel = $("compare-label");
+
+  if (state.showChinese) {
+    if (nowLabel) {
+      nowLabel.textContent = state.chineseVisible ? "English + 中文" : "Original";
+    }
+    $("sentence").textContent = state.original || "";
+    let zhText = "";
+    if (state.chineseVisible) {
+      if (state.chinese && String(state.chinese).trim()) {
+        zhText = state.chinese;
+      } else if (state.bookRewriteActive) {
+        zhText = zhPendingMessage(state);
+      } else if (!state.chineseReady) {
+        zhText = "中文 not ready for this sentence yet";
+      }
+    }
+    if (zhEl) {
+      zhEl.textContent = zhText;
+      zhEl.classList.toggle("hidden", !zhText);
+      zhEl.setAttribute("aria-hidden", zhText ? "false" : "true");
+    }
     compare.classList.add("hidden");
     compare.setAttribute("aria-hidden", "true");
+  } else {
+    if (nowLabel) nowLabel.textContent = "Now reading";
+    $("sentence").textContent = state.sentence;
+    if (zhEl) {
+      zhEl.textContent = "";
+      zhEl.classList.add("hidden");
+      zhEl.setAttribute("aria-hidden", "true");
+    }
+    if (state.level > 0 && state.original) {
+      if (compareLabel) compareLabel.textContent = "Original";
+      $("previous-text").textContent = state.original;
+      compare.classList.remove("hidden");
+      compare.setAttribute("aria-hidden", "false");
+    } else {
+      compare.classList.add("hidden");
+      compare.setAttribute("aria-hidden", "true");
+    }
   }
-  if (!state.canSimplify) {
-    $("btn-simplify").disabled = true;
-    $("btn-simplify").title = "Already at simplest level";
-  } else if (!busy) {
-    $("btn-simplify").disabled = false;
-    $("btn-simplify").title = "Simplify (↓)";
+  const keysHint = $("html-keys-hint");
+  if (state.showChinese) {
+    if (keysHint) {
+      keysHint.textContent = state.chineseVisible
+        ? "← original only · ↓ prev · ↑ next · Esc back"
+        : "→ English + 中文 · ↓ prev · ↑ next · Esc back";
+    }
+    $("btn-simplify").disabled = busy || !state.canSimplify;
+    $("btn-simplify").title = state.canSimplify ? "English + 中文 (→)" : "Showing English + 中文";
+    $("btn-harder").disabled = busy || !state.canGoHarder;
+    $("btn-harder").title = state.canGoHarder ? "Original only (←)" : "Original only";
+  } else {
+    if (keysHint) {
+      keysHint.textContent = "↓ prev · ↑ next · ← harder · → simpler · M mode · Esc back";
+    }
+    if (!state.canSimplify) {
+      $("btn-simplify").disabled = true;
+      $("btn-simplify").title = "Already at simplest level";
+    } else if (!busy) {
+      $("btn-simplify").disabled = false;
+      $("btn-simplify").title = "Simpler (→)";
+    }
+    $("btn-harder").disabled = busy || !state.canGoHarder;
   }
-  $("btn-harder").disabled = busy || !state.canGoHarder;
 }
 
 async function api(path, opts = {}) {
@@ -141,14 +347,17 @@ async function loadBody(body, isJSON) {
   return api("/api/load", opts);
 }
 
-async function startPaste() {
+async function doStartPaste() {
   const text = $("paste-text").value.trim();
   if (!text) {
     showError($("load-error"), "Paste some text first.");
     return;
   }
   showError($("load-error"), "");
-  const data = await loadBody(JSON.stringify({ text }), true);
+  const data = await loadBody(
+    JSON.stringify({ text, readingMode: getReadingMode() }),
+    true
+  );
   beginSession(data);
 }
 
@@ -211,15 +420,47 @@ function hideRewriteOverlay() {
   }
 }
 
+function libraryRewriteFinished(book) {
+  const t = book?.totalSentences || 0;
+  if (!t) return book?.rewriteStatus === "done";
+  const eng = book.rewriteDone ?? 0;
+  const zh = book.chineseRewriteDone ?? 0;
+  return book.rewriteStatus === "done" && eng >= t && zh >= t;
+}
+
 function pollRewriteProgress(bookId, onDone) {
+  if (rewritePollTimer) {
+    clearTimeout(rewritePollTimer);
+    rewritePollTimer = null;
+  }
   const tick = async () => {
     try {
       const data = await api(`/api/library/book?id=${encodeURIComponent(bookId)}`);
       const book = data.book;
-      const pct = book.totalSentences ? (100 * book.rewriteDone) / book.totalSentences : 0;
-      $("rewrite-progress").value = pct;
-      $("rewrite-label").textContent = `${book.rewriteDone} / ${book.totalSentences} sentences`;
-      if (book.rewriteStatus === "done") {
+      const inReader =
+        document.body.classList.contains("reader-active") && currentBookId === bookId;
+
+      if (inReader && sessionId) {
+        const st = await api("/api/state");
+        renderState(st.state);
+      } else {
+        const t = book.totalSentences || 0;
+        const eng = book.rewriteDone ?? 0;
+        const zh = book.chineseRewriteDone ?? 0;
+        const zhPhase = t > 0 && eng >= t && zh < t;
+        const done = zhPhase ? zh : eng;
+        const pct = t ? (100 * done) / t : 0;
+        const prog = $("rewrite-progress");
+        const label = $("rewrite-label");
+        if (prog) prog.value = pct;
+        if (label) {
+          label.textContent = zhPhase
+            ? `chinese.json ${zh} / ${t}`
+            : `english.json ${eng} / ${t}`;
+        }
+      }
+
+      if (libraryRewriteFinished(book)) {
         hideRewriteOverlay();
         refreshLibrary();
         if (onDone) onDone();
@@ -232,29 +473,11 @@ function pollRewriteProgress(bookId, onDone) {
         return;
       }
       rewritePollTimer = setTimeout(tick, 1500);
-    } catch (e) {
+    } catch (_) {
       rewritePollTimer = setTimeout(tick, 2000);
     }
   };
   tick();
-}
-
-async function importBookFile() {
-  const input = $("file-input");
-  if (!input.files?.length) {
-    showError($("load-error"), "Choose a file.");
-    return;
-  }
-  showError($("load-error"), "");
-  const fd = new FormData();
-  fd.append("file", input.files[0]);
-  const res = await fetch("/api/library/import", { method: "POST", body: fd });
-  if (!res.ok) {
-    throw new Error(await res.text());
-  }
-  const data = await res.json();
-  refreshLibrary();
-  await openLibraryBook(data.book.id);
 }
 
 async function openLibraryBook(bookId) {
@@ -266,22 +489,77 @@ async function openLibraryBook(bookId) {
   beginSession(data);
 }
 
-async function startFile() {
+async function changeReadingModeInSession() {
+  if (!sessionId) return;
   try {
-    await importBookFile();
+    const data = await api("/api/reading-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ readingMode: getReadingMode() }),
+    });
+    renderState(data.state);
   } catch (e) {
-    showError($("load-error"), friendlyError(e));
+    showError($("reader-error"), friendlyError(e));
   }
 }
 
-async function openSelectedBook() {
+async function doOpenSelectedBook() {
   if (!selectedBookId) {
     showError($("load-error"), "Select a book from the library.");
     return;
   }
   showError($("load-error"), "");
+  await openLibraryBook(selectedBookId);
+}
+
+async function doImportBookFile() {
+  const input = $("file-input");
+  if (!input.files?.length) {
+    showError($("load-error"), "Choose a file.");
+    return;
+  }
+  showError($("load-error"), "");
+  const fd = new FormData();
+  fd.append("readingMode", getReadingMode());
+  fd.append("file", input.files[0]);
+  const res = await fetch("/api/library/import", { method: "POST", body: fd });
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
+  const data = await res.json();
+  refreshLibrary();
+  await openLibraryBook(data.book.id);
+  refreshLibrary();
+}
+
+function selectedBookTitle() {
+  const b = libraryBooks.find((x) => x.id === selectedBookId);
+  return b?.title || "this book";
+}
+
+async function deleteSelectedBook() {
+  if (!selectedBookId) {
+    showError($("load-error"), "Select a book from the library.");
+    return;
+  }
+  const title = selectedBookTitle();
+  if (!confirm(`Delete “${title}” from your library? This cannot be undone.`)) {
+    return;
+  }
+  showError($("load-error"), "");
+  const id = selectedBookId;
   try {
-    await openLibraryBook(selectedBookId);
+    await api("/api/library/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bookId: id }),
+    });
+    if (currentBookId === id) {
+      hideRewriteOverlay();
+      newSession();
+    }
+    selectedBookId = null;
+    await refreshLibrary();
   } catch (e) {
     showError($("load-error"), friendlyError(e));
   }
@@ -291,14 +569,28 @@ function renderPrepBar(state) {
   const bar = $("prep-status-bar");
   const spinner = $("prep-spinner");
   const text = $("prep-status-text");
-  const msg = state.prepStatus || (state.prepActive ? "Preparing…" : "Ready");
+  const prog = $("prep-book-progress");
+  if (!bar || !text) return;
+  const bookPending = bookRewritePending(state);
+  const bookMsg = bookRewriteMessage(state);
+  let msg = state.prepStatus || (state.prepActive ? "Preparing…" : "Ready");
+  if (bookMsg) msg = bookMsg;
   text.textContent = msg;
-  const active = state.prepActive || state.bookRewriteActive;
+  const active = bookPending || state.prepActive;
+  bar.classList.toggle("hidden", !active);
+  if (prog) {
+    if (bookPending) {
+      prog.classList.remove("hidden");
+      prog.value = bookRewritePercent(state);
+    } else {
+      prog.classList.add("hidden");
+    }
+  }
   if (active) {
-    spinner.classList.remove("hidden");
+    spinner?.classList.toggle("hidden", bookPending);
     bar.classList.remove("ready");
   } else {
-    spinner.classList.add("hidden");
+    spinner?.classList.add("hidden");
     bar.classList.add("ready");
   }
 }
@@ -309,7 +601,11 @@ function pollUntilReady() {
     try {
       const data = await api("/api/state");
       renderState(data.state);
-      if (data.state.prepActive || data.state.bookRewriteActive) {
+      const waitingZh =
+        data.state.showChinese &&
+        data.state.chineseVisible &&
+        !data.state.chineseReady;
+      if (data.state.prepActive || bookRewritePending(data.state) || waitingZh) {
         setTimeout(tick, 1500);
       }
     } catch (_) {}
@@ -317,15 +613,32 @@ function pollUntilReady() {
   setTimeout(tick, 800);
 }
 
-function beginSession(data) {
+async function syncReadingModeToServer() {
+  if (!sessionId) return;
+  try {
+    const data = await api("/api/reading-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ readingMode: getReadingMode() }),
+    });
+    renderState(data.state);
+  } catch (_) {}
+}
+
+async function beginSession(data) {
   sessionId = data.sessionId;
   currentBookId = data.bookId || null;
   sourceFilename = data.sourceFilename || "paste";
+  document.body.classList.add("reader-active");
   $("load-panel").classList.add("hidden");
   $("reader-panel").classList.remove("hidden");
+  const titleEl = $("reader-book-title");
+  if (titleEl) titleEl.textContent = sourceFilename || "Reading";
   renderState(data.state);
-  $("sentence").focus();
+  await syncReadingModeToServer();
+  $("html-reader-main")?.focus();
   pollUntilReady();
+  if (currentBookId) pollRewriteProgress(currentBookId);
 }
 
 async function saveProgress(closeRewrite = false) {
@@ -351,6 +664,8 @@ function newSession() {
   sessionId = null;
   currentBookId = null;
   busy = false;
+  hideReadingModeOverlay(false);
+  document.body.classList.remove("reader-active");
   $("reader-panel").classList.add("hidden");
   $("load-panel").classList.remove("hidden");
   showError($("reader-error"), "");
@@ -395,17 +710,28 @@ async function easier() {
   if (!sessionId || busy) return;
   busy = true;
   showError($("reader-error"), "");
-  renderPrepBar({ prepStatus: "Simplifying with Gemma…", prepActive: true });
-  setLoading(true, "");
+  const showZh =
+    getReadingMode() === "english_chinese" || lastReaderState?.showChinese;
+  if (!showZh) {
+    renderPrepBar({ prepStatus: "Simplifying with Gemma…", prepActive: true });
+    setLoading(true, "");
+  }
   try {
     const data = await api("/api/easier", { method: "POST" });
     renderState(data.state);
+    if (
+      data.state.showChinese &&
+      data.state.chineseVisible &&
+      !data.state.chineseReady
+    ) {
+      pollUntilReady();
+    }
   } catch (e) {
     showError($("reader-error"), friendlyError(e));
   } finally {
     busy = false;
-    setLoading(false);
-    if (sessionId) {
+    if (!showZh) setLoading(false);
+    if (sessionId && !showZh) {
       const data = await api("/api/state");
       renderState(data.state);
     }
@@ -459,35 +785,105 @@ function friendlyError(e) {
 }
 
 function onReaderKey(e) {
+  if (modeOverlayOpen()) return;
   if ($("reader-panel").classList.contains("hidden")) return;
   if (busy) return;
-  if (e.target.matches("textarea, input")) return;
+  if (e.target.matches("textarea, input:not([type='hidden'])")) return;
+
+  if (e.key === "Escape") {
+    e.preventDefault();
+    newSession();
+    return;
+  }
+  if (e.key === "m" || e.key === "M") {
+    e.preventDefault();
+    withReadingMode(() => changeReadingModeInSession());
+    return;
+  }
   if (e.key === "ArrowDown") {
     e.preventDefault();
-    easier();
+    prevSentence();
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
-    harder();
+    nextSentence();
   } else if (e.key === "ArrowRight") {
     e.preventDefault();
-    nextSentence();
+    easier(); // EN+中文 mode: show original + 中文
   } else if (e.key === "ArrowLeft") {
     e.preventDefault();
-    prevSentence();
+    harder(); // EN+中文 mode: back to original only
+  }
+}
+
+async function loadOllamaModels() {
+  const sel = $("ollama-model");
+  if (!sel) return;
+  try {
+    const res = await fetch("/api/ollama");
+    if (!res.ok) throw new Error("bad status");
+    const data = await res.json();
+    const models = Array.isArray(data.models) ? data.models : [];
+    const current = data.model || "";
+    sel.innerHTML = "";
+    if (models.length === 0) {
+      const opt = document.createElement("option");
+      opt.value = current;
+      opt.textContent = current || "(no models — ollama pull …)";
+      sel.appendChild(opt);
+    } else {
+      for (const name of models) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      }
+      if (current && !models.includes(current)) {
+        const opt = document.createElement("option");
+        opt.value = current;
+        opt.textContent = `${current} (saved)`;
+        sel.insertBefore(opt, sel.firstChild);
+      }
+    }
+    sel.value = current || models[0] || "";
+    sel.disabled = false;
+    updateServerStatusLine(data);
+  } catch (_) {
+    sel.innerHTML = "<option>Ollama unavailable</option>";
+    sel.disabled = true;
+  }
+}
+
+async function setOllamaModel(model) {
+  if (!model) return;
+  try {
+    localStorage.setItem("ollamaModel", model);
+  } catch (_) {}
+  const res = await fetch("/api/ollama", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const data = await res.json();
+  updateServerStatusLine({ model: data.model, url: null, ollamaOk: true });
+}
+
+function updateServerStatusLine(data) {
+  const el = $("server-status");
+  if (!el) return;
+  el.classList.remove("error");
+  const model = data.model || $("ollama-model")?.value || "?";
+  const url = data.url || data.ollama || "";
+  if (data.ollamaOk === false) {
+    el.textContent = `Model: ${model} · Ollama not reachable`;
+    el.classList.add("error");
+  } else {
+    el.textContent = url ? `Using ${model} · ${url}` : `Using ${model}`;
   }
 }
 
 async function checkHealth() {
-  const el = $("server-status");
-  try {
-    const res = await fetch("/api/health");
-    if (!res.ok) throw new Error("bad status");
-    const h = await res.json();
-    el.textContent = `Model: ${h.model} · Ollama: ${h.ollama}`;
-  } catch (_) {
-    el.textContent = "Server not running — start with: go run .";
-    el.classList.add("error");
-  }
+  await loadOllamaModels();
 }
 
 document.querySelectorAll(".tab").forEach((btn) => {
@@ -501,16 +897,26 @@ document.querySelectorAll(".tab").forEach((btn) => {
 });
 
 bindClick("btn-load-paste", () =>
-  startPaste().catch((e) => showError($("load-error"), friendlyError(e)))
+  withReadingMode(() => doStartPaste().catch((e) => showError($("load-error"), friendlyError(e))))
 );
 bindClick("btn-load-file", () =>
-  startFile().catch((e) => showError($("load-error"), friendlyError(e)))
+  withReadingMode(() => doImportBookFile().catch((e) => {
+    hideRewriteOverlay();
+    showError($("load-error"), friendlyError(e));
+  }))
 );
-bindClick("btn-open-book", () => openSelectedBook());
+bindClick("btn-open-book", () =>
+  withReadingMode(() =>
+    doOpenSelectedBook().catch((e) => showError($("load-error"), friendlyError(e))
+  ))
+);
 bindClick("btn-export-html", () =>
   exportLibraryHTML().catch((e) => showError($("load-error"), friendlyError(e)))
 );
 bindClick("btn-refresh-library", () => refreshLibrary());
+bindClick("btn-delete-book", () =>
+  deleteSelectedBook().catch((e) => showError($("load-error"), friendlyError(e)))
+);
 bindClick("btn-simplify", () => easier());
 bindClick("btn-harder", () => harder());
 bindClick("btn-next", () => nextSentence());
@@ -530,9 +936,17 @@ bindClick("btn-dl-html", () => {
 bindClick("btn-new", () => newSession());
 
 window.addEventListener("keydown", onReaderKey, true);
+window.addEventListener("keydown", onModeOverlayKey, true);
 window.addEventListener("beforeunload", () => saveProgressBeacon(true));
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") saveProgressBeacon(false);
+});
+
+$("ollama-model")?.addEventListener("change", (e) => {
+  setOllamaModel(e.target.value).catch((err) => {
+    showError($("load-error"), friendlyError(err));
+    loadOllamaModels();
+  });
 });
 
 checkHealth();

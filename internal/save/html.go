@@ -7,7 +7,24 @@ import (
 	"fmt"
 	"html/template"
 	"strings"
+
+	"reading-assistant/internal/session"
 )
+
+// EffectiveExportReadingMode enables EN+中文 in the export when 中文 is present on disk
+// even if meta.readingMode was left as english.
+func EffectiveExportReadingMode(mode string, sentences []ReaderSentence) string {
+	mode = session.NormalizeReadingMode(mode)
+	if session.ChineseEnabled(mode) {
+		return mode
+	}
+	for _, s := range sentences {
+		if strings.TrimSpace(s.Chinese) != "" {
+			return session.ModeEnglishChinese
+		}
+	}
+	return mode
+}
 
 // SafeFilename returns a name safe for download paths.
 func SafeFilename(name string) string {
@@ -35,20 +52,22 @@ func SafeFilename(name string) string {
 type ReaderSentence struct {
 	Original string   `json:"original"`
 	Levels   []string `json:"levels"`
+	Chinese  string   `json:"chinese,omitempty"`
 }
 
 // ReaderExport is embedded in exported HTML for offline arrow-key reading.
 type ReaderExport struct {
-	Title      string           `json:"title"`
-	Note       string           `json:"note,omitempty"`
-	StartIndex int              `json:"startIndex"`
-	StartLevel int              `json:"startLevel"`
-	MaxLevel   int              `json:"maxLevel"`
-	Sentences  []ReaderSentence `json:"sentences"`
+	Title       string           `json:"title"`
+	Note        string           `json:"note,omitempty"`
+	StartIndex  int              `json:"startIndex"`
+	StartLevel  int              `json:"startLevel"`
+	MaxLevel    int              `json:"maxLevel"`
+	ReadingMode string           `json:"readingMode,omitempty"`
+	Sentences   []ReaderSentence `json:"sentences"`
 }
 
 // BuildReaderSentences maps library/session data into export sentences.
-func BuildReaderSentences(sentences []string, prepared map[int]map[int]string, maxLevel int) []ReaderSentence {
+func BuildReaderSentences(sentences []string, english map[int]map[int]string, chinese map[int]string, maxLevel int) []ReaderSentence {
 	if maxLevel < 1 {
 		maxLevel = 3
 	}
@@ -58,11 +77,16 @@ func BuildReaderSentences(sentences []string, prepared map[int]map[int]string, m
 			Original: orig,
 			Levels:   make([]string, maxLevel),
 		}
-		if levels, ok := prepared[i]; ok {
+		if levels, ok := english[i]; ok {
 			for lv := 1; lv <= maxLevel; lv++ {
 				if t, ok := levels[lv]; ok && strings.TrimSpace(t) != "" {
 					rs.Levels[lv-1] = t
 				}
+			}
+		}
+		if chinese != nil {
+			if t, ok := chinese[i]; ok && strings.TrimSpace(t) != "" {
+				rs.Chinese = t
 			}
 		}
 		out[i] = rs
@@ -71,26 +95,8 @@ func BuildReaderSentences(sentences []string, prepared map[int]map[int]string, m
 }
 
 type readerHTMLPage struct {
-	Title      string
-	BookChunks []string // base64 shards (A–Z0–9+/= only) in <script type="text/plain">
-}
-
-const bookB64ChunkSize = 60000
-
-func chunkString(s string, size int) []string {
-	if len(s) <= size {
-		return []string{s}
-	}
-	var out []string
-	for len(s) > 0 {
-		n := size
-		if n > len(s) {
-			n = len(s)
-		}
-		out = append(out, s[:n])
-		s = s[n:]
-	}
-	return out
+	Title    string
+	BookData template.HTML // base64 JSON (A–Z0–9+/=); must not pass through script-context escaping
 }
 
 var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE html>
@@ -187,19 +193,49 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
     perspective: 900px;
     outline: none;
   }
+  .reader-stack {
+    width: 100%;
+    max-width: 40rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.85rem;
+    transform-origin: center center;
+    will-change: transform, opacity;
+  }
   #sentence {
     margin: 0;
     width: 100%;
-    max-width: 40rem;
     font-size: var(--reader-font-size);
     line-height: 1.65;
     text-align: center;
     color: #fff;
     overflow-wrap: anywhere;
     word-break: break-word;
-    transform-origin: center center;
-    will-change: transform, opacity;
   }
+  #chinese-panel {
+    margin: 0;
+    width: 100%;
+    padding-top: 0.65rem;
+    border-top: 1px solid #333;
+    font-size: calc(var(--reader-font-size) * 0.92);
+    line-height: 1.6;
+    text-align: center;
+    color: #bbb;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  }
+  #chinese-panel.hidden { display: none; }
+  #easier-line {
+    margin: 0;
+    width: 100%;
+    font-size: calc(var(--reader-font-size) * 0.88);
+    line-height: 1.5;
+    text-align: center;
+    color: #888;
+  }
+  #easier-line.hidden { display: none; }
   @keyframes turn-out-next {
     to {
       opacity: 0;
@@ -232,15 +268,15 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
       transform: translateY(0) rotateX(0);
     }
   }
-  #sentence.turn-out-next { animation: turn-out-next 0.22s ease-in forwards; }
-  #sentence.turn-in-next { animation: turn-in-next 0.26s ease-out forwards; }
-  #sentence.turn-out-prev { animation: turn-out-prev 0.22s ease-in forwards; }
-  #sentence.turn-in-prev { animation: turn-in-prev 0.26s ease-out forwards; }
+  .reader-stack.turn-out-next { animation: turn-out-next 0.22s ease-in forwards; }
+  .reader-stack.turn-in-next { animation: turn-in-next 0.26s ease-out forwards; }
+  .reader-stack.turn-out-prev { animation: turn-out-prev 0.22s ease-in forwards; }
+  .reader-stack.turn-in-prev { animation: turn-in-prev 0.26s ease-out forwards; }
   @media (prefers-reduced-motion: reduce) {
-    #sentence.turn-out-next,
-    #sentence.turn-in-next,
-    #sentence.turn-out-prev,
-    #sentence.turn-in-prev {
+    .reader-stack.turn-out-next,
+    .reader-stack.turn-in-next,
+    .reader-stack.turn-out-prev,
+    .reader-stack.turn-in-prev {
       animation: none !important;
     }
   }
@@ -263,6 +299,19 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
     left: max(1rem, env(safe-area-inset-left));
     color: #888;
   }
+  .keys-hint {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: max(2.5rem, env(safe-area-inset-bottom));
+    z-index: 10;
+    margin: 0;
+    text-align: center;
+    font-family: system-ui, sans-serif;
+    font-size: 0.68rem;
+    color: #555;
+    pointer-events: none;
+  }
 </style>
 </head>
 <body>
@@ -274,15 +323,25 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
     </div>
   </header>
   <main id="reader" tabindex="0" aria-live="polite">
-    <p id="sentence"></p>
+    <div class="reader-stack" id="reader-stack">
+      <p id="sentence"></p>
+      <p id="chinese-panel" class="hidden" lang="zh-Hant"></p>
+      <p id="easier-line" class="easier-line hidden"></p>
+    </div>
   </main>
   <div class="level-badge" id="level-badge">Original</div>
   <div class="page-num" id="progress">1 / 1</div>
-  <script type="text/plain" id="book-b64">{{range .BookChunks}}{{.}}{{end}}</script>
+  <p id="keys-hint" class="keys-hint hidden"></p>
+  <textarea id="book-b64" hidden readonly aria-hidden="true">{{.BookData}}</textarea>
 <script>
 (function () {
   function decodeB64Utf8(b64) {
-    const clean = b64.replace(/\s/g, "");
+    let clean = b64.replace(/\s/g, "");
+    clean = clean.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = clean.length % 4;
+    if (pad === 2) clean += "==";
+    else if (pad === 3) clean += "=";
+    else if (pad === 1) throw new Error("invalid base64 length");
     const bin = atob(clean);
     if (typeof TextDecoder !== "undefined") {
       const bytes = new Uint8Array(bin.length);
@@ -295,8 +354,9 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
   let book;
   try {
     const b64el = document.getElementById("book-b64");
-    if (!b64el || !b64el.textContent.trim()) throw new Error("missing data");
-    book = JSON.parse(decodeB64Utf8(b64el.textContent));
+    const raw = b64el ? (b64el.value || b64el.textContent || "") : "";
+    if (!raw.trim()) throw new Error("missing data");
+    book = JSON.parse(decodeB64Utf8(raw));
     if (!book.sentences || !book.sentences.length) throw new Error("empty book");
   } catch (err) {
     document.body.innerHTML =
@@ -305,10 +365,19 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
     return;
   }
   const maxLevel = book.maxLevel || 3;
+  const showChinese = book.readingMode === "english_chinese";
   let index = Math.min(Math.max(0, book.startIndex || 0), book.sentences.length - 1);
-  let level = Math.min(Math.max(0, book.startLevel || 0), maxLevel);
+  let level = showChinese ? 0 : Math.min(Math.max(0, book.startLevel || 0), maxLevel);
+  let chineseVisible = showChinese ? false : true;
 
   const $ = (id) => document.getElementById(id);
+  const keysHint = $("keys-hint");
+  if (keysHint) {
+    keysHint.textContent = showChinese
+      ? "↓ prev · ↑ next · → English + 中文 · ← original only"
+      : "↓ prev · ↑ next · → simpler · ← harder";
+    keysHint.classList.remove("hidden");
+  }
   const FONT_MIN = 16, FONT_MAX = 180, FONT_DEFAULT = 22;
   let fontSize = FONT_DEFAULT;
   try {
@@ -350,14 +419,41 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches || isIOS;
 
   function levelLabel() {
+    if (showChinese) return chineseVisible ? "Original + 中文" : "Original";
     return level === 0 ? "Original" : "Easier · level " + level + "/" + maxLevel;
+  }
+
+  function chineseAt(idx) {
+    const s = book.sentences[idx];
+    if (!s || !s.chinese) return "";
+    return String(s.chinese).trim();
   }
 
   function render() {
     const total = book.sentences.length;
     $("progress").textContent = (index + 1) + " / " + total;
     $("level-badge").textContent = levelLabel();
-    $("sentence").textContent = textAt(index, level);
+    const zh = $("chinese-panel");
+    const easier = $("easier-line");
+    if (showChinese) {
+      $("sentence").textContent = textAt(index, 0);
+      const t = chineseVisible ? chineseAt(index) : "";
+      if (t && zh) {
+        zh.textContent = t;
+        zh.classList.remove("hidden");
+      } else if (zh) {
+        zh.textContent = chineseAt(index) ? "（按 → 顯示中文）" : "";
+        zh.classList.toggle("hidden", !zh.textContent);
+      }
+      if (easier) easier.classList.add("hidden");
+    } else {
+      $("sentence").textContent = textAt(index, level);
+      if (zh) {
+        zh.textContent = "";
+        zh.classList.add("hidden");
+      }
+      if (easier) easier.classList.add("hidden");
+    }
   }
 
   function turnPage(dir) {
@@ -369,11 +465,12 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
       if (dir > 0) index++;
       else index--;
       level = 0;
+      if (showChinese) chineseVisible = false;
       render();
       return;
     }
 
-    const el = $("sentence");
+    const el = $("reader-stack");
     animating = true;
     const outClass = dir > 0 ? "turn-out-next" : "turn-out-prev";
     const inClass = dir > 0 ? "turn-in-next" : "turn-in-prev";
@@ -388,6 +485,7 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
       if (dir > 0) index++;
       else index--;
       level = 0;
+      if (showChinese) chineseVisible = false;
       render();
       el.classList.add(inClass);
       const done = setTimeout(finishTurn, 280);
@@ -423,13 +521,33 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
     turnPage(1);
   }
 
+  function showZh() {
+    if (!showChinese) return;
+    chineseVisible = true;
+    render();
+  }
+
+  function hideZh() {
+    if (!showChinese) return;
+    chineseVisible = false;
+    render();
+  }
+
   function simpler() {
+    if (showChinese) {
+      showZh();
+      return;
+    }
     if (!canSimplify()) return;
     level++;
     render();
   }
 
   function harder() {
+    if (showChinese) {
+      hideZh();
+      return;
+    }
     if (level <= 0) return;
     level--;
     render();
@@ -444,8 +562,13 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
     const ady = Math.abs(dy);
     if (Math.max(adx, ady) < SWIPE_MIN_PX) return;
     if (axis === "x" || (!axis && adx >= ady)) {
-      if (dx > 0) harder();
-      else simpler();
+      if (showChinese) {
+        if (dx > 0) showZh();
+        else hideZh();
+      } else {
+        if (dx > 0) harder();
+        else simpler();
+      }
     } else {
       if (dy > 0) prev();
       else next();
@@ -500,11 +623,11 @@ var readerHTMLTemplate = template.Must(template.New("reader").Parse(`<!DOCTYPE h
         break;
       case "ArrowLeft":
         e.preventDefault();
-        simpler();
+        harder();
         break;
       case "ArrowRight":
         e.preventDefault();
-        harder();
+        simpler();
         break;
     }
   }
@@ -540,15 +663,18 @@ func BuildBookHTML(export ReaderExport) ([]byte, error) {
 	if export.StartLevel < 0 || export.StartLevel > export.MaxLevel {
 		export.StartLevel = 0
 	}
+	export.ReadingMode = EffectiveExportReadingMode(export.ReadingMode, export.Sentences)
 	raw, err := json.Marshal(export)
 	if err != nil {
 		return nil, err
 	}
 	b64 := base64.StdEncoding.EncodeToString(raw)
 	var buf bytes.Buffer
+	// template.HTML: html/template must not apply script-context escaping to base64
+	// (would turn "/" into "\/" and break atob).
 	if err := readerHTMLTemplate.Execute(&buf, readerHTMLPage{
-		Title:      export.Title,
-		BookChunks: chunkString(b64, bookB64ChunkSize),
+		Title:    export.Title,
+		BookData: template.HTML(b64),
 	}); err != nil {
 		return nil, fmt.Errorf("html: %w", err)
 	}

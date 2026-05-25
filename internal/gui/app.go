@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -67,8 +68,9 @@ type readerUI struct {
 	readerCard *fyne.Container
 
 	pasteEntry *widget.Entry
-	progress   *widget.Label
-	levelBadge *widget.Label
+	progress       *widget.Label
+	readingModeLbl *widget.Label
+	levelBadge     *widget.Label
 	sentenceRT      *widget.RichText
 	sentenceScaled  *scaledTheme
 	sentenceWrap    *container.ThemeOverride
@@ -76,7 +78,14 @@ type readerUI struct {
 	previousRT      *widget.RichText
 	previousScaled  *scaledTheme
 	previousWrap    *container.ThemeOverride
+	chineseLabel    *widget.Label
+	chineseRT       *widget.RichText
+	chineseScaled   *scaledTheme
+	chineseWrap     *container.ThemeOverride
+	chineseBox      *fyne.Container
 	readingScroll   *container.Scroll
+	readingMode     string
+	modeRadio       *widget.RadioGroup
 	textSize        float32
 	fontSlider     *widget.Slider
 	fontSizeValue  *widget.Label
@@ -99,6 +108,7 @@ type readerUI struct {
 	libraryList       *widget.List
 	libraryStatus     *widget.Label
 	libraryRewriteBar *widget.ProgressBar
+	modelSelect       *widget.Select
 	libraryItems     []string
 	libraryIDs       []string
 	selectedLibrary  int
@@ -114,6 +124,7 @@ func (u *readerUI) build() {
 
 	openBtn := widget.NewButton("Add book to library (.txt, .epub, .pdf, .mobi)", func() { u.openFile() })
 	startPaste := widget.NewButton("Start reading", func() { u.startPaste() })
+	u.readingMode = session.ModeEnglish
 	u.selectedLibrary = -1
 	u.libraryList = widget.NewList(
 		func() int { return len(u.libraryItems) },
@@ -132,16 +143,42 @@ func (u *readerUI) build() {
 	openLibBtn := widget.NewButton("Open saved book", func() { u.openSelectedLibraryBook() })
 	exportHTMLBtn := widget.NewButton("Export HTML…", func() { u.exportLibraryHTML(u.selectedLibraryBookID()) })
 	refreshLibBtn := widget.NewButton("Refresh", func() { u.refreshLibraryList() })
+	deleteLibBtn := widget.NewButton("Delete", func() { u.deleteSelectedLibraryBook() })
+	u.modeRadio = widget.NewRadioGroup([]string{"Original + easier 1–3", "English + 中文"}, func(s string) {
+		if s == "English + 中文" {
+			u.readingMode = session.ModeEnglishChinese
+		} else {
+			u.readingMode = session.ModeEnglish
+		}
+		u.app.Preferences().SetString("readingMode", u.readingMode)
+	})
+	if saved := u.app.Preferences().StringWithFallback("readingMode", session.ModeEnglish); saved == session.ModeEnglishChinese {
+		u.readingMode = session.ModeEnglishChinese
+		u.modeRadio.SetSelected("English + 中文")
+	} else {
+		u.modeRadio.SetSelected("Original + easier 1–3")
+	}
+	u.modeRadio.Horizontal = true
+
+	u.modelSelect = widget.NewSelect([]string{}, func(name string) {
+		u.applyOllamaModel(name)
+	})
+	u.initOllamaModelSelect(u.modelSelect)
 
 	u.loadCard = container.NewVBox(
 		widget.NewLabel("Load text to read sentence by sentence."),
-		widget.NewLabel(fmt.Sprintf("Model: %s", u.cfg.OllamaModel)),
+		widget.NewLabel("Local LLM (Ollama)"),
+		u.modelSelect,
 		widget.NewLabel("Ctrl+Enter start · Ctrl+O open file"),
+		widget.NewSeparator(),
+		widget.NewLabel("Reading view"),
+		u.modeRadio,
+		widget.NewLabel("Upload: english.json (easier 1–3), then chinese.json (繁體). View picks display only."),
 		widget.NewSeparator(),
 		widget.NewLabel("Your library"),
 		u.libraryStatus,
 		container.NewScroll(u.libraryList),
-		container.NewHBox(openLibBtn, exportHTMLBtn, refreshLibBtn),
+		container.NewHBox(openLibBtn, exportHTMLBtn, refreshLibBtn, deleteLibBtn),
 		widget.NewSeparator(),
 		widget.NewLabel("Paste"),
 		u.pasteEntry,
@@ -151,6 +188,8 @@ func (u *readerUI) build() {
 	)
 
 	u.progress = widget.NewLabel("")
+	u.readingModeLbl = widget.NewLabel("")
+	u.readingModeLbl.Hide()
 	u.levelBadge = widget.NewLabel("Original")
 	u.sentenceRT = widget.NewRichText()
 	u.sentenceRT.Wrapping = fyne.TextWrapWord
@@ -163,6 +202,14 @@ func (u *readerUI) build() {
 	u.previousScaled = newScaledTheme(u.textSize)
 	u.previousWrap = container.NewThemeOverride(u.previousRT, u.previousScaled)
 	u.compareBox = container.NewVBox(u.previousLabel, u.previousWrap)
+	u.chineseLabel = widget.NewLabel("")
+	u.chineseLabel.Hide()
+	u.chineseRT = widget.NewRichText()
+	u.chineseRT.Wrapping = fyne.TextWrapWord
+	u.chineseScaled = newScaledTheme(u.textSize)
+	u.chineseWrap = container.NewThemeOverride(u.chineseRT, u.chineseScaled)
+	u.chineseBox = container.NewVBox(u.chineseWrap)
+	u.chineseBox.Hide()
 	u.status = widget.NewLabel("")
 	u.libraryRewriteBar = widget.NewProgressBar()
 	u.libraryRewriteBar.Hide()
@@ -172,7 +219,7 @@ func (u *readerUI) build() {
 	u.prepStatusBar = container.NewBorder(nil, nil, nil, u.prepBar, u.prepStatus)
 	prepArea := container.NewVBox(u.libraryRewriteBar, u.prepStatusBar)
 	u.hint = widget.NewLabel(
-		"↓ Simpler · ↑ Harder · → Next · ← Prev · Ctrl+arrows anywhere · Ctrl +/− text size",
+		"EN+中文: start original only · → English+中文 · ← original · ↓↑ sentences",
 	)
 
 	prevBtn := widget.NewButton("← Prev sentence", func() { u.prev() })
@@ -219,15 +266,16 @@ func (u *readerUI) build() {
 		u.keyCap,
 	)
 
+	englishZhStack := container.NewVBox(sentencePanel, u.chineseBox)
 	readingContent := container.NewVBox(
 		nowLabel,
-		sentencePanel,
+		englishZhStack,
 		u.compareBox,
 	)
 	u.readingScroll = container.NewVScroll(readingContent)
 
 	topBar := container.NewVBox(
-		container.NewHBox(u.progress, layout.NewSpacer(), u.levelBadge),
+		container.NewHBox(u.progress, layout.NewSpacer(), u.readingModeLbl, u.levelBadge),
 		fontRow,
 		container.NewPadded(prepArea),
 	)
@@ -311,6 +359,7 @@ func (u *readerUI) beginReading(text, filename, sourceDir string) {
 	u.sourceDir = sourceDir
 	u.sourceBase = save.BaseName(filename)
 	u.sess = u.mgr.Create("gui", parts)
+	u.sess.SetReadingMode(u.readingMode)
 	u.sess.SetSource(u.exportDir(), filename)
 	u.loadCard.Hide()
 	u.readerCard.Show()
@@ -323,6 +372,18 @@ func (u *readerUI) beginReading(text, filename, sourceDir string) {
 
 func (u *readerUI) prepareAsync() {
 	if u.sess == nil {
+		return
+	}
+	if u.bookID != "" {
+		u.syncLibraryPrepared(u.bookID)
+		fyne.Do(func() {
+			if u.sess != nil {
+				u.render(u.enrichLibraryView(u.sess.View(), u.bookID))
+			}
+		})
+		return
+	}
+	if session.ChineseEnabled(u.readingMode) {
 		return
 	}
 	go func() {
@@ -359,7 +420,8 @@ func (u *readerUI) startPoll() {
 					}
 					u.render(v)
 				})
-				if !v.PrepActive && !v.BookRewriteActive {
+				waitingZh := v.ShowChinese && v.ChineseVisible && !v.ChineseReady
+				if !v.PrepActive && !v.BookRewriteActive && !waitingZh {
 					return
 				}
 			}
@@ -380,7 +442,18 @@ func (u *readerUI) render(v session.View) {
 		v = u.enrichLibraryView(u.sess.View(), u.bookID)
 	}
 	u.progress.SetText(fmt.Sprintf("%d / %d", v.Index+1, v.Total))
-	u.levelBadge.SetText(levelLabel(v.Level))
+	if v.ShowChinese {
+		u.readingModeLbl.SetText("EN + 中文")
+		u.readingModeLbl.Show()
+		if v.ChineseVisible {
+			u.levelBadge.SetText("Original + 中文")
+		} else {
+			u.levelBadge.SetText("Original")
+		}
+	} else {
+		u.readingModeLbl.Hide()
+		u.levelBadge.SetText(levelLabel(v.Level))
+	}
 	u.renderPrepBar(v)
 	u.applyViewText(v)
 }
@@ -405,24 +478,62 @@ func (u *readerUI) refreshTextSizes() {
 	}
 }
 
+func zhPendingMessage(v session.View) string {
+	if !v.BookRewriteActive || v.BookRewriteTotal <= 0 {
+		return "中文 not ready for this sentence yet"
+	}
+	if v.BookRewriteDone < v.BookRewriteTotal {
+		return fmt.Sprintf("english.json %d/%d, then chinese.json…", v.BookRewriteDone, v.BookRewriteTotal)
+	}
+	return fmt.Sprintf("chinese.json %d/%d…", v.BookChineseDone, v.BookRewriteTotal)
+}
+
 func (u *readerUI) applyViewText(v session.View) {
 	u.sentenceScaled.setSize(u.textSize)
 	u.sentenceWrap.Refresh()
-	setRichText(u.sentenceRT, v.Sentence, true, false)
+	if v.ShowChinese {
+		setRichText(u.sentenceRT, v.Original, true, false)
+		zhText := ""
+		if v.ChineseVisible {
+			zhText = strings.TrimSpace(v.Chinese)
+			if zhText == "" && v.BookRewriteActive && v.BookRewriteTotal > 0 {
+				zhText = zhPendingMessage(v)
+			} else if zhText == "" && !v.ChineseReady {
+				zhText = "中文 not ready for this sentence yet"
+			}
+		}
+		if zhText != "" {
+			zhSize := u.textSize - 2
+			if zhSize < fontSizeMin {
+				zhSize = fontSizeMin
+			}
+			u.chineseScaled.setSize(zhSize)
+			u.chineseWrap.Refresh()
+			setRichText(u.chineseRT, zhText, false, false)
+			u.chineseBox.Show()
+		} else {
+			u.chineseBox.Hide()
+		}
+		u.compareBox.Hide()
+	} else {
+		u.chineseBox.Hide()
+		setRichText(u.sentenceRT, v.Sentence, true, false)
+		if v.Level > 0 && v.Original != "" {
+			prevSize := u.textSize - 4
+			if prevSize < fontSizeMin {
+				prevSize = fontSizeMin
+			}
+			u.previousScaled.setSize(prevSize)
+			u.previousWrap.Refresh()
+			u.previousLabel.SetText("Original")
+			setRichText(u.previousRT, v.Original, false, false)
+			u.compareBox.Show()
+		} else {
+			u.compareBox.Hide()
+		}
+	}
 	if u.readingScroll != nil {
 		u.readingScroll.Refresh()
-	}
-	if v.Level > 0 && v.Original != "" {
-		prevSize := u.textSize - 4
-		if prevSize < fontSizeMin {
-			prevSize = fontSizeMin
-		}
-		u.previousScaled.setSize(prevSize)
-		u.previousWrap.Refresh()
-		setRichText(u.previousRT, v.Original, false, false)
-		u.compareBox.Show()
-	} else {
-		u.compareBox.Hide()
 	}
 }
 
@@ -435,7 +546,11 @@ func (u *readerUI) renderPrepBar(v session.View) {
 	if v.BookRewriteActive {
 		u.libraryRewriteBar.Show()
 		if v.BookRewriteTotal > 0 {
-			u.libraryRewriteBar.SetValue(float64(v.BookRewriteDone) / float64(v.BookRewriteTotal))
+			done := v.BookRewriteDone
+			if done >= v.BookRewriteTotal {
+				done = v.BookChineseDone
+			}
+			u.libraryRewriteBar.SetValue(float64(done) / float64(v.BookRewriteTotal))
 		}
 		u.prepBar.Stop()
 		u.prepBar.Hide()
@@ -460,6 +575,27 @@ func levelLabel(level int) string {
 
 func (u *readerUI) easier() {
 	if u.sess == nil || u.busy {
+		return
+	}
+	if u.bookID != "" {
+		u.syncLibraryPrepared(u.bookID)
+	}
+	if session.ChineseEnabled(u.readingMode) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		v, err := u.sess.Easier(ctx, u.llm)
+		if err != nil {
+			u.showErr(err)
+			return
+		}
+		if u.bookID != "" {
+			v = u.enrichLibraryView(v, u.bookID)
+		}
+		u.render(v)
+		if v.ShowChinese && v.ChineseVisible && !v.ChineseReady {
+			u.startPoll()
+		}
+		u.persistLibraryPosition()
 		return
 	}
 	u.busy = true

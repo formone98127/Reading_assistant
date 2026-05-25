@@ -17,7 +17,7 @@ type ollamaTags struct {
 
 // ResolveOllamaModel returns the best local model: gemma4 if installed, else most recent.
 func ResolveOllamaModel(baseURL string) (string, error) {
-	names, err := listOllamaModels(baseURL)
+	names, err := ListOllamaModels(baseURL)
 	if err != nil {
 		return "", err
 	}
@@ -32,7 +32,8 @@ func ResolveOllamaModel(baseURL string) (string, error) {
 	return names[0], nil
 }
 
-func listOllamaModels(baseURL string) ([]string, error) {
+// ListOllamaModels returns installed Ollama model names (most recently modified first).
+func ListOllamaModels(baseURL string) ([]string, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	url := strings.TrimSuffix(baseURL, "/") + "/api/tags"
 	res, err := client.Get(url)

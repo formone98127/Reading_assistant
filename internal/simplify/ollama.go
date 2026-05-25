@@ -181,3 +181,19 @@ func (c *Client) Warm(ctx context.Context) error {
 	_, err := c.chat(ctx, "Reply with exactly: ok", map[string]any{"num_predict": 16})
 	return err
 }
+
+// TranslateChinese returns a Traditional Chinese (繁體) translation of one sentence.
+func (c *Client) TranslateChinese(ctx context.Context, original string) (string, error) {
+	raw, err := c.chat(ctx, ChinesePrompt(original), singleOptions())
+	if err != nil {
+		return "", err
+	}
+	line := firstUsefulLine(raw, original)
+	if line == "" {
+		line = strings.TrimSpace(raw)
+	}
+	if line == "" {
+		return "", fmt.Errorf("%s returned no Chinese translation", c.Model)
+	}
+	return line, nil
+}

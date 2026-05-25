@@ -74,12 +74,14 @@ func (u *readerUI) exportSessionHTML() {
 		title = "paste"
 	}
 	v := u.sess.View()
+	sentencesOut := save.BuildReaderSentences(u.sess.Sentences, u.sess.PreparedSnapshot(), u.sess.ChineseSnapshot(), session.MaxLevel)
 	data, err := save.BuildBookHTML(save.ReaderExport{
-		Title:      title,
-		StartIndex: v.Index,
-		StartLevel: v.Level,
-		MaxLevel:   session.MaxLevel,
-		Sentences:  save.BuildReaderSentences(u.sess.Sentences, u.sess.PreparedSnapshot(), session.MaxLevel),
+		Title:       title,
+		StartIndex:  v.Index,
+		StartLevel:  v.Level,
+		MaxLevel:    session.MaxLevel,
+		ReadingMode: save.EffectiveExportReadingMode(u.sess.ReadingModeValue(), sentencesOut),
+		Sentences:   sentencesOut,
 	})
 	if err != nil {
 		u.showErr(err)

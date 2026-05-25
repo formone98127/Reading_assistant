@@ -27,15 +27,6 @@ func Load() Config {
 	if url == "" {
 		url = "http://127.0.0.1:11434"
 	}
-	model := os.Getenv("OLLAMA_MODEL")
-	if model == "" {
-		model = DefaultOllamaModel
-		if resolved, err := ResolveOllamaModel(url); err == nil {
-			model = resolved
-		} else {
-			log.Printf("ollama not reachable (%v); will try %q anyway", err, model)
-		}
-	}
 	saveDir := os.Getenv("SAVE_DIR")
 	if saveDir == "" {
 		if home, err := os.UserHomeDir(); err == nil {
@@ -45,6 +36,21 @@ func Load() Config {
 		}
 	}
 	_ = os.MkdirAll(saveDir, 0o755)
+
+	model := os.Getenv("OLLAMA_MODEL")
+	if model == "" {
+		if saved := LoadUserSettings(saveDir).OllamaModel; saved != "" {
+			model = saved
+		}
+	}
+	if model == "" {
+		model = DefaultOllamaModel
+		if resolved, err := ResolveOllamaModel(url); err == nil {
+			model = resolved
+		} else {
+			log.Printf("ollama not reachable (%v); will try %q anyway", err, model)
+		}
+	}
 
 	log.Printf("using Ollama model %q", model)
 	return Config{

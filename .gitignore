@@ -1,0 +1,8 @@
+.env
+*.exe
+*.exe~
+*.session
+*.session-journal
+__pycache__/
+.venv/
+venv/

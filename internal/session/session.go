@@ -12,21 +12,26 @@ import (
 const MaxLevel = 3
 
 type Session struct {
-	mu        sync.Mutex
-	Sentences []string
-	Index     int
-	Level     int
-	Original  string
-	Current   string
-	Cache     map[int]string // levels 1-3 for current sentence
+	mu          sync.Mutex
+	Sentences   []string
+	Index       int
+	Level       int
+	Original    string
+	Current     string
+	Cache       map[int]string // levels 1-3 for current sentence
+	ReadingMode    string
+	Chinese        string // translation for current sentence
+	chineseVisible bool   // EN+中文: false = original only, true = show 中文
 
 	SourceDir  string
 	SourceName string
 	BookID     string
 
-	// prepared[idx] = simplified levels for that sentence (background LLM)
+	// prepared[idx] = simplified English levels (1–3), separate from Chinese
 	prepared map[int]map[int]string
+	chinese  map[int]string
 	inFlight map[int]chan struct{}
+	zhFlight map[int]chan struct{}
 }
 
 type Manager struct {
@@ -44,10 +49,13 @@ func NewManager(llm *simplify.Client) *Manager {
 
 func (m *Manager) Create(id string, sentences []string) *Session {
 	s := &Session{
-		Sentences: sentences,
-		Cache:     make(map[int]string),
-		prepared:  make(map[int]map[int]string),
-		inFlight:  make(map[int]chan struct{}),
+		Sentences:   sentences,
+		Cache:       make(map[int]string),
+		ReadingMode: ModeEnglish,
+		prepared:    make(map[int]map[int]string),
+		chinese:     make(map[int]string),
+		inFlight:    make(map[int]chan struct{}),
+		zhFlight:    make(map[int]chan struct{}),
 	}
 	if len(sentences) > 0 {
 		s.applySentenceLocked(0)
@@ -81,22 +89,42 @@ func (s *Session) SetBookID(id string) {
 	s.mu.Unlock()
 }
 
+func (s *Session) SetReadingMode(mode string) {
+	s.mu.Lock()
+	s.ReadingMode = NormalizeReadingMode(mode)
+	s.Level = 0
+	s.Current = s.Original
+	s.chineseVisible = false
+	s.mu.Unlock()
+}
+
+func (s *Session) ReadingModeValue() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return NormalizeReadingMode(s.ReadingMode)
+}
+
 func (s *Session) BookIDValue() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.BookID
 }
 
-// RefreshPrepared merges levels loaded from disk (e.g. while background book rewrite runs).
-func (s *Session) RefreshPrepared(all map[int]map[int]string) {
+// RefreshPrepared merges English levels and Chinese from disk.
+func (s *Session) RefreshPrepared(english map[int]map[int]string, chinese map[int]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for idx, levels := range all {
+	for idx, levels := range english {
 		cp := make(map[int]string, len(levels))
 		for k, v := range levels {
 			cp[k] = v
 		}
 		s.prepared[idx] = cp
+	}
+	for idx, text := range chinese {
+		if strings.TrimSpace(text) != "" {
+			s.chinese[idx] = text
+		}
 	}
 	idx := s.Index
 	s.Cache = make(map[int]string)
@@ -105,6 +133,7 @@ func (s *Session) RefreshPrepared(all map[int]map[int]string) {
 			s.Cache[k] = v
 		}
 	}
+	s.Chinese = s.chinese[idx]
 	if s.Level > 0 {
 		if t, ok := s.Cache[s.Level]; ok {
 			s.Current = t
@@ -115,22 +144,28 @@ func (s *Session) RefreshPrepared(all map[int]map[int]string) {
 	}
 }
 
-// SeedPrepared loads cached simplify levels (e.g. from library bundle).
-func (s *Session) SeedPrepared(all map[int]map[int]string) {
+// SeedPrepared loads cached English levels and Chinese (e.g. from library bundle).
+func (s *Session) SeedPrepared(english map[int]map[int]string, chinese map[int]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for idx, levels := range all {
+	for idx, levels := range english {
 		cp := make(map[int]string, len(levels))
 		for k, v := range levels {
 			cp[k] = v
 		}
 		s.prepared[idx] = cp
 	}
+	for idx, text := range chinese {
+		if strings.TrimSpace(text) != "" {
+			s.chinese[idx] = text
+		}
+	}
 	if levels, ok := s.prepared[s.Index]; ok {
 		for k, v := range levels {
 			s.Cache[k] = v
 		}
 	}
+	s.Chinese = s.chinese[s.Index]
 }
 
 // ApplyReadPosition restores index and simplification level from library metadata.
@@ -156,6 +191,7 @@ func (s *Session) ApplyReadPosition(index, level int) {
 			s.Current = t
 		}
 	}
+	s.Chinese = s.chinese[index]
 }
 
 // Source returns the export directory and original filename.
@@ -181,6 +217,19 @@ func (s *Session) ParagraphsAtLevel(level int) []string {
 			}
 		}
 		out[i] = text
+	}
+	return out
+}
+
+// ChineseSnapshot returns a copy of cached Chinese translations.
+func (s *Session) ChineseSnapshot() map[int]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[int]string, len(s.chinese))
+	for idx, text := range s.chinese {
+		if strings.TrimSpace(text) != "" {
+			out[idx] = text
+		}
 	}
 	return out
 }
@@ -230,9 +279,17 @@ type View struct {
 	PrepActive  bool   `json:"prepActive"`
 	AtEnd       bool   `json:"atEnd"`
 
+	ReadingMode      string `json:"readingMode"`
+	ShowChinese      bool   `json:"showChinese"`
+	ChineseVisible   bool   `json:"chineseVisible"`
+	Chinese          string `json:"chinese,omitempty"`
+	ChineseReady     bool   `json:"chineseReady"`
+	ChinesePreparing bool   `json:"chinesePreparing"`
+
 	BookRewriteActive bool `json:"bookRewriteActive"`
 	BookRewriteDone   int  `json:"bookRewriteDone"`
 	BookRewriteTotal  int  `json:"bookRewriteTotal"`
+	BookChineseDone   int  `json:"bookChineseDone"`
 }
 
 func (s *Session) View() View {
@@ -262,12 +319,38 @@ func (s *Session) PrepareSentence(ctx context.Context, llm *simplify.Client, idx
 	_ = s.fetchLevels(ctx, llm, idx, original)
 }
 
-// PrepareWhileReading preloads simplifications for the current sentence only.
+// PrepareWhileReading preloads English easier levels for the current sentence (paste only).
+// 中文 while reading comes from library chinese.json only (not mixed with english.json).
 func (s *Session) PrepareWhileReading(ctx context.Context, llm *simplify.Client) {
 	s.mu.Lock()
 	cur := s.Index
+	mode := NormalizeReadingMode(s.ReadingMode)
+	bookID := s.BookID
 	s.mu.Unlock()
+	if ChineseEnabled(mode) || bookID != "" {
+		return
+	}
 	s.PrepareSentence(ctx, llm, cur)
+}
+
+// PrepareChinese starts background translation when idx is the active sentence.
+func (s *Session) PrepareChinese(ctx context.Context, llm *simplify.Client, idx int) {
+	s.mu.Lock()
+	if !ChineseEnabled(s.ReadingMode) || idx < 0 || idx >= len(s.Sentences) || idx != s.Index {
+		s.mu.Unlock()
+		return
+	}
+	if t, ok := s.chinese[idx]; ok && strings.TrimSpace(t) != "" {
+		s.mu.Unlock()
+		return
+	}
+	if _, busy := s.zhFlight[idx]; busy {
+		s.mu.Unlock()
+		return
+	}
+	original := s.Sentences[idx]
+	s.mu.Unlock()
+	_ = s.fetchChinese(ctx, llm, idx, original)
 }
 
 func (s *Session) fetchLevels(ctx context.Context, llm *simplify.Client, idx int, original string) error {
@@ -324,6 +407,55 @@ func (s *Session) fetchLevels(ctx context.Context, llm *simplify.Client, idx int
 	return nil
 }
 
+func (s *Session) fetchChinese(ctx context.Context, llm *simplify.Client, idx int, original string) error {
+	s.mu.Lock()
+	if !ChineseEnabled(s.ReadingMode) {
+		s.mu.Unlock()
+		return nil
+	}
+	if t, ok := s.chinese[idx]; ok && strings.TrimSpace(t) != "" {
+		s.mu.Unlock()
+		return nil
+	}
+	if ch, ok := s.zhFlight[idx]; ok {
+		s.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ch:
+			return nil
+		}
+	}
+	done := make(chan struct{})
+	s.zhFlight[idx] = done
+	cur := s.Index
+	s.mu.Unlock()
+
+	text, err := llm.TranslateChinese(ctx, original)
+
+	s.mu.Lock()
+	delete(s.zhFlight, idx)
+	close(done)
+	stale := idx != s.Index || idx != cur || idx < 0 || idx >= len(s.Sentences) || s.Sentences[idx] != original
+	if err != nil {
+		s.mu.Unlock()
+		if !stale {
+			log.Printf("prepare chinese %d: %v", idx, err)
+		}
+		return err
+	}
+	if stale {
+		s.mu.Unlock()
+		return nil
+	}
+	s.chinese[idx] = text
+	if idx == s.Index {
+		s.Chinese = text
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 func (s *Session) ensureLevels(ctx context.Context, llm *simplify.Client, original string) error {
 	s.mu.Lock()
 	idx := s.Index
@@ -344,6 +476,12 @@ func (s *Session) ensureLevels(ctx context.Context, llm *simplify.Client, origin
 
 func (s *Session) Easier(ctx context.Context, llm *simplify.Client) (View, error) {
 	s.mu.Lock()
+	if ChineseEnabled(s.ReadingMode) {
+		s.chineseVisible = true
+		v := s.viewLocked()
+		s.mu.Unlock()
+		return v, nil
+	}
 	if s.Level >= MaxLevel {
 		v := s.viewLocked()
 		s.mu.Unlock()
@@ -391,6 +529,10 @@ func (s *Session) Easier(ctx context.Context, llm *simplify.Client) (View, error
 func (s *Session) Harder() View {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if ChineseEnabled(s.ReadingMode) {
+		s.chineseVisible = false
+		return s.viewLocked()
+	}
 	if s.Level <= 0 {
 		return s.viewLocked()
 	}
@@ -436,6 +578,7 @@ func (s *Session) Prev() View {
 func (s *Session) applySentenceLocked(idx int) {
 	if s.BookID == "" {
 		s.evictPreparedExcept(idx)
+		s.evictChineseExcept(idx)
 	}
 	s.Level = 0
 	s.Original = s.Sentences[idx]
@@ -444,6 +587,21 @@ func (s *Session) applySentenceLocked(idx int) {
 	if levels, ok := s.prepared[idx]; ok {
 		for k, v := range levels {
 			s.Cache[k] = v
+		}
+	}
+	s.Chinese = s.chinese[idx]
+	s.chineseVisible = false
+}
+
+func (s *Session) evictChineseExcept(keep int) {
+	for i := range s.chinese {
+		if i != keep {
+			delete(s.chinese, i)
+		}
+	}
+	for i := range s.zhFlight {
+		if i != keep {
+			delete(s.zhFlight, i)
 		}
 	}
 }
@@ -463,48 +621,110 @@ func (s *Session) evictPreparedExcept(keep int) {
 }
 
 func (s *Session) viewLocked() View {
-	ready := len(s.Cache) > 0
-	if !ready {
-		if levels, ok := s.prepared[s.Index]; ok {
-			ready = len(levels) > 0
+	mode := NormalizeReadingMode(s.ReadingMode)
+	showZh := ChineseEnabled(mode)
+
+	var ready bool
+	var preparing bool
+	if showZh {
+		ch := strings.TrimSpace(s.chinese[s.Index])
+		ready = ch != ""
+		_, zhBusy := s.zhFlight[s.Index]
+		preparing = zhBusy && !ready
+	} else {
+		ready = len(s.Cache) > 0
+		if !ready {
+			if levels, ok := s.prepared[s.Index]; ok {
+				ready = len(levels) > 0
+			}
 		}
+		_, curBusy := s.inFlight[s.Index]
+		preparing = curBusy && !ready
 	}
-	_, preparing := s.inFlight[s.Index]
-	preparing = preparing && !ready
+
 	prepStatus, prepActive := s.prepStatusLocked(ready)
 	prev, prevLvl := s.compareLocked()
+
+	level := s.Level
+	current := s.Current
+	if showZh {
+		level = 0
+		current = s.Original
+	}
+
+	chinese := s.Chinese
+	chReady := strings.TrimSpace(chinese) != ""
+	if !chReady {
+		if t, ok := s.chinese[s.Index]; ok {
+			chinese = t
+			chReady = strings.TrimSpace(t) != ""
+		}
+	}
+	_, zhBusy := s.zhFlight[s.Index]
+	zhPreparing := showZh && zhBusy && !chReady
+
+	var canSimplify, canGoHarder bool
+	if showZh {
+		// → reveals 中文 under original (even while translation is still loading).
+		canSimplify = !s.chineseVisible
+		canGoHarder = s.chineseVisible
+	} else {
+		canSimplify = level < MaxLevel
+		canGoHarder = level > 0
+	}
+
 	return View{
-		Index:          s.Index,
-		Total:          len(s.Sentences),
-		Level:          s.Level,
-		MaxLevel:       MaxLevel,
-		Sentence:       s.Current,
-		Original:       s.Original,
-		Previous:       prev,
-		PreviousLevel:  prevLvl,
-		CanSimplify:    s.Level < MaxLevel,
-		CanGoHarder:    s.Level > 0,
-		Preparing:      preparing,
-		Ready:          ready,
-		PrepStatus:     prepStatus,
-		PrepActive:     prepActive,
-		AtEnd:          s.Index >= len(s.Sentences)-1,
+		Index:            s.Index,
+		Total:            len(s.Sentences),
+		Level:            level,
+		MaxLevel:         MaxLevel,
+		Sentence:         current,
+		Original:         s.Original,
+		Previous:         prev,
+		PreviousLevel:    prevLvl,
+		CanSimplify:      canSimplify,
+		CanGoHarder:      canGoHarder,
+		Preparing:        preparing,
+		Ready:            ready,
+		PrepStatus:       prepStatus,
+		PrepActive:       prepActive,
+		AtEnd:            s.Index >= len(s.Sentences)-1,
+		ReadingMode:      mode,
+		ShowChinese:      showZh,
+		ChineseVisible:   showZh && s.chineseVisible,
+		Chinese:          chinese,
+		ChineseReady:     chReady,
+		ChinesePreparing: zhPreparing,
 	}
 }
 
 func (s *Session) prepStatusLocked(curReady bool) (string, bool) {
 	_, curBusy := s.inFlight[s.Index]
+	showZh := ChineseEnabled(s.ReadingMode)
+	chReady := strings.TrimSpace(s.chinese[s.Index]) != ""
 
+	if showZh {
+		if !chReady {
+			return "Press → for 中文 when library rewrite has this sentence", false
+		}
+		if s.chineseVisible {
+			return "English + 中文 — ← original only · ↓↑ change sentence", false
+		}
+		return "Original only — press → for English + 中文 · ↓↑ change sentence", false
+	}
 	if curBusy {
 		return "Preparing 3 easier versions for this sentence (Gemma 4)…", true
 	}
 	if !curReady {
 		return "Preparing easier versions for this sentence…", true
 	}
-	return "Ready — press ↓ for easier versions", false
+	return "Ready — press → for easier versions", false
 }
 
 func (s *Session) compareLocked() (string, int) {
+	if ChineseEnabled(s.ReadingMode) {
+		return "", 0
+	}
 	if s.Level <= 0 {
 		return "", 0
 	}

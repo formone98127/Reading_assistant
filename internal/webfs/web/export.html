@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Export books — Reading Assistant</title>
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/export.css" />
+</head>
+<body class="export-site">
+  <div id="export-app">
+    <header class="export-header">
+      <a href="/" class="export-back">← Reading Assistant</a>
+      <h1>Export books</h1>
+      <p class="hint">Each book can be opened as a local website or downloaded as a single offline HTML file.</p>
+    </header>
+
+    <section class="export-controls">
+      <label class="export-mode-label">
+        <span>Export / site mode</span>
+        <select id="export-mode" class="export-mode-select">
+          <option value="english_chinese">English + 中文 (→ shows 中文)</option>
+          <option value="english">English only (original + easier 1–3)</option>
+        </select>
+      </label>
+      <button type="button" id="btn-refresh-books" class="btn-ghost">Refresh list</button>
+    </section>
+
+    <p id="export-status" class="hint export-status">Loading library…</p>
+    <ul id="export-book-list" class="export-book-list"></ul>
+    <p id="export-error" class="error hidden"></p>
+
+    <section class="export-help">
+      <h2 class="section-title">How it works</h2>
+      <ul class="export-help-list">
+        <li><strong>Open website</strong> — full-screen reader at <code>/book/&lt;id&gt;</code> while the app is running.</li>
+        <li><strong>Download HTML</strong> — one file you can email or open in any browser (no server).</li>
+        <li><strong>Save to library folder</strong> — writes <code>reader.html</code> next to the book data for static hosting.</li>
+      </ul>
+    </section>
+  </div>
+  <script src="/export.js"></script>
+  <noscript>
+    <p class="error" style="padding:1rem">JavaScript is required for the book list. Enable JS and reload.</p>
+  </noscript>
+</body>
+</html>

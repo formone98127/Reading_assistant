@@ -24,5 +24,17 @@ func SinglePrompt(original string, level int, previous string) string {
 	}
 }
 
+// ChinesePrompt asks for a natural Traditional Chinese translation of one English sentence.
+func ChinesePrompt(original string) string {
+	return `Translate this English sentence into natural Traditional Chinese (繁體中文, used in Taiwan/Hong Kong) for a learner reading along with the English.
+
+Rules:
+- Use Traditional characters only (繁體), not Simplified (简体).
+- Output ONLY the Chinese translation, one sentence.
+- Do not include English, pinyin, or notes.
+
+English: ` + original
+}
+
 // System is unused with Gemma 4 (instructions are in the user message).
 func System() string { return "" }

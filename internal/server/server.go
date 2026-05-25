@@ -14,6 +14,7 @@ import (
 
 	"reading-assistant/internal/config"
 	"reading-assistant/internal/library"
+	"reading-assistant/internal/webfs"
 	"reading-assistant/internal/parser"
 	"reading-assistant/internal/save"
 	"reading-assistant/internal/sentences"
@@ -23,6 +24,8 @@ import (
 
 type Server struct {
 	cfg            config.Config
+	cfgMu          sync.RWMutex
+	llm            *simplify.Client
 	manager        *session.Manager
 	library        *library.Store
 	rewriter       *library.Rewriter
@@ -39,19 +42,22 @@ func New(cfg config.Config, static http.Handler) *Server {
 	lib := library.NewStore(cfg.SaveDir)
 	return &Server{
 		cfg:     cfg,
+		llm:     llm,
 		manager: session.NewManager(llm),
 		library: lib,
 		rewriter: &library.Rewriter{
 			Store: lib,
 			LLM:   llm,
 		},
-		static: static,
+		rewriteCancel: make(map[string]context.CancelFunc),
+		static:        static,
 	}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/ollama", s.handleOllama)
 	mux.HandleFunc("/api/load", s.handleLoad)
 	mux.HandleFunc("/api/easier", s.handleEasier)
 	mux.HandleFunc("/api/harder", s.handleHarder)
@@ -63,6 +69,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/library", s.handleLibrary)
 	mux.HandleFunc("/api/library/", s.handleLibrary)
 	mux.HandleFunc("/api/progress", s.handleSaveProgress)
+	mux.HandleFunc("/api/reading-mode", s.handleReadingMode)
+	mux.HandleFunc("/book/", s.handleBookReader)
+	mux.Handle("/export", webfs.ExportHubHandler())
+	mux.Handle("/export.html", webfs.ExportHubHandler())
+	mux.Handle("/export.js", webfs.ExportHubHandler())
+	mux.Handle("/export.css", webfs.ExportHubHandler())
 	if s.static != nil {
 		mux.Handle("/", s.static)
 	}
@@ -71,8 +83,8 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
-		"ok":    true,
-		"model": s.cfg.OllamaModel,
+		"ok":     true,
+		"model":  s.currentModel(),
 		"ollama": s.cfg.OllamaURL,
 	})
 }
@@ -88,9 +100,11 @@ func (s *Server) handleLoad(w http.ResponseWriter, r *http.Request) {
 	var text string
 	var filename string
 
+	readingMode := session.ModeEnglish
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var req struct {
-			Text string `json:"text"`
+			Text        string `json:"text"`
+			ReadingMode string `json:"readingMode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -98,11 +112,13 @@ func (s *Server) handleLoad(w http.ResponseWriter, r *http.Request) {
 		}
 		text = parser.FromPlain(req.Text)
 		filename = "paste.txt"
+		readingMode = session.NormalizeReadingMode(req.ReadingMode)
 	} else {
 		if err := r.ParseMultipartForm(maxBody); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		readingMode = session.NormalizeReadingMode(r.FormValue("readingMode"))
 		if pasted := r.FormValue("text"); pasted != "" {
 			text = parser.FromPlain(pasted)
 			filename = "paste.txt"
@@ -133,6 +149,7 @@ func (s *Server) handleLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	id := newSessionID()
 	sess := s.manager.Create(id, parts)
+	sess.SetReadingMode(readingMode)
 	base := save.BaseName(filename)
 	dir := filepath.Join(s.cfg.SaveDir, base)
 	sess.SetSource(dir, filename)
@@ -185,12 +202,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 			base = "paste"
 		}
 		v := sess.View()
+		sentencesOut := save.BuildReaderSentences(sess.Sentences, sess.PreparedSnapshot(), sess.ChineseSnapshot(), session.MaxLevel)
 		data, err := save.BuildBookHTML(save.ReaderExport{
-			Title:      base,
-			StartIndex: v.Index,
-			StartLevel: v.Level,
-			MaxLevel:   session.MaxLevel,
-			Sentences:  save.BuildReaderSentences(sess.Sentences, sess.PreparedSnapshot(), session.MaxLevel),
+			Title:       base,
+			StartIndex:  v.Index,
+			StartLevel:  v.Level,
+			MaxLevel:    session.MaxLevel,
+			ReadingMode: save.EffectiveExportReadingMode(sess.ReadingModeValue(), sentencesOut),
+			Sentences:   sentencesOut,
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -277,9 +296,9 @@ func (s *Server) handleEasier(w http.ResponseWriter, r *http.Request) {
 	// Don't tie Ollama to the HTTP request context — first load can take 1–2 min.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	llm := &simplify.Client{BaseURL: s.cfg.OllamaURL, Model: s.cfg.OllamaModel}
-	log.Printf("simplify: session=%s model=%s", r.Header.Get("X-Session-Id"), s.cfg.OllamaModel)
-	view, err := sess.Easier(ctx, llm)
+	log.Printf("simplify: session=%s model=%s", r.Header.Get("X-Session-Id"), s.currentModel())
+	s.refreshSessionFromLibrary(sess)
+	view, err := sess.Easier(ctx, s.llm)
 	if err != nil {
 		log.Printf("simplify error: %v", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -349,11 +368,18 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func (s *Server) prepareWhileReading(sess *session.Session) {
-	llm := s.manager.LLM()
+	s.refreshSessionFromLibrary(sess)
+	// Library books: easier + 中文 come from rewrite cache only (no live LLM while reading).
+	if sess.BookIDValue() != "" {
+		return
+	}
+	if session.ChineseEnabled(sess.ReadingModeValue()) {
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		sess.PrepareWhileReading(ctx, llm)
+		sess.PrepareWhileReading(ctx, s.llm)
 	}()
 }
 

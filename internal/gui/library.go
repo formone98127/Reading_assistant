@@ -5,11 +5,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/storage"
+	"fyne.io/fyne/v2/widget"
 
 	"reading-assistant/internal/library"
 	"reading-assistant/internal/parser"
@@ -76,18 +79,37 @@ func (u *readerUI) importAndRewrite(name string, data []byte, text string) {
 		return
 	}
 	title := save.BaseName(name)
-	meta, err := u.lib.Import(title, name, data, parts)
+	mode := u.readingMode
+	meta, err := u.lib.Import(title, name, data, parts, mode)
 	if err != nil {
 		u.showErr(err)
 		return
 	}
 	u.refreshLibraryList()
+	u.libraryStatus.SetText("Rewriting english.json, then chinese.json…")
 	u.openLibraryBook(meta.ID)
 	u.startBackgroundRewrite(meta.ID, meta.Title)
 }
 
 func (u *readerUI) ensureBookRewrite(bookID, title, status string) {
-	if status == library.StatusDone || status == library.StatusError {
+	if status == library.StatusError {
+		return
+	}
+	if status == library.StatusDone {
+		meta, err := u.lib.LoadMeta(bookID)
+		if err != nil {
+			return
+		}
+		prepared, err := u.lib.LoadPrepared(bookID)
+		if err != nil {
+			return
+		}
+		for i := 0; i < meta.TotalSentences; i++ {
+			if strings.TrimSpace(prepared.Chinese[i]) == "" {
+				u.startBackgroundRewrite(bookID, title)
+				return
+			}
+		}
 		return
 	}
 	u.startBackgroundRewrite(bookID, title)
@@ -143,7 +165,7 @@ func (u *readerUI) syncLibraryPrepared(bookID string) {
 	if err != nil {
 		return
 	}
-	u.sess.RefreshPrepared(prepared)
+	u.sess.RefreshPrepared(prepared.English, prepared.Chinese)
 }
 
 func (u *readerUI) enrichLibraryView(v session.View, bookID string) session.View {
@@ -153,9 +175,16 @@ func (u *readerUI) enrichLibraryView(v session.View, bookID string) session.View
 	}
 	v.BookRewriteDone = meta.RewriteDone
 	v.BookRewriteTotal = meta.TotalSentences
-	v.BookRewriteActive = meta.RewriteStatus == library.StatusRewriting || meta.RewriteStatus == library.StatusPending
+	v.BookChineseDone = meta.ChineseRewriteDone
+	v.BookRewriteActive = library.RewriteProgressActive(meta)
 	if v.BookRewriteActive && meta.TotalSentences > 0 {
-		v.PrepStatus = fmt.Sprintf("Background rewrite %d/%d — you can read now", meta.RewriteDone, meta.TotalSentences)
+		if meta.RewriteDone >= meta.TotalSentences && meta.ChineseRewriteDone < meta.TotalSentences {
+			v.PrepStatus = fmt.Sprintf("chinese.json %d/%d — you can read now", meta.ChineseRewriteDone, meta.TotalSentences)
+		} else {
+			v.PrepStatus = fmt.Sprintf("english.json %d/%d — you can read now", meta.RewriteDone, meta.TotalSentences)
+		}
+		v.PrepActive = true
+	} else if v.ShowChinese && v.PrepStatus != "" {
 		v.PrepActive = true
 	}
 	return v
@@ -183,7 +212,8 @@ func (u *readerUI) openLibraryBook(bookID string) {
 	u.sess = u.mgr.Create("gui-"+bookID, parts)
 	u.sess.SetBookID(bookID)
 	u.sess.SetSource(u.sourceDir, meta.Title)
-	u.sess.SeedPrepared(prepared)
+	u.sess.SetReadingMode(meta.ReadingMode)
+	u.sess.SeedPrepared(prepared.English, prepared.Chinese)
 	u.sess.ApplyReadPosition(meta.ReadIndex, meta.ReadLevel)
 	u.loadCard.Hide()
 	u.readerCard.Show()
@@ -221,7 +251,96 @@ func (u *readerUI) flushLibraryToDisk() {
 	if u.bookID == "" || u.sess == nil {
 		return
 	}
-	_ = u.lib.PersistPrepared(u.bookID, u.sess.PreparedSnapshot())
+	_ = u.lib.PersistPrepared(u.bookID, u.sess.PreparedSnapshot(), u.sess.ChineseSnapshot())
+}
+
+func (u *readerUI) deleteSelectedLibraryBook() {
+	id := u.selectedLibraryBookID()
+	if id == "" {
+		dialog.ShowInformation("Delete book", "Select a book from the library first.", u.window)
+		return
+	}
+	meta, err := u.lib.LoadMeta(id)
+	if err != nil {
+		u.showErr(err)
+		return
+	}
+	title := meta.Title
+	if title == "" {
+		title = id
+	}
+	dialog.ShowConfirm(
+		"Delete book",
+		fmt.Sprintf("Delete “%s” from your library?\n\nThis cannot be undone.", title),
+		func(ok bool) {
+			if !ok {
+				return
+			}
+			u.deleteLibraryBook(id)
+		},
+		u.window,
+	)
+}
+
+func (u *readerUI) exitReader() {
+	u.persistLibraryPosition()
+	u.stopPoll()
+	u.readerCard.Hide()
+	u.loadCard.Show()
+}
+
+func (u *readerUI) showReadingModeDialog() {
+	if u.sess == nil {
+		return
+	}
+	items := []string{"Original + easier 1–3", "Original → English + 中文 (→ key)"}
+	current := 0
+	if u.readingMode == session.ModeEnglishChinese {
+		current = 1
+	}
+	radio := widget.NewRadioGroup(items, nil)
+	radio.SetSelected(items[current])
+	radio.Horizontal = true
+	content := container.NewVBox(
+		widget.NewLabel("Pick what to show while reading."),
+		widget.NewLabel("Upload writes english.json (easier 1–3) then chinese.json (繁體)."),
+		radio,
+	)
+	dialog.ShowCustomConfirm("Reading mode", "Apply", "Cancel (Esc)", content, func(ok bool) {
+		if !ok {
+			return
+		}
+		if radio.Selected == items[1] {
+			u.readingMode = session.ModeEnglishChinese
+		} else {
+			u.readingMode = session.ModeEnglish
+		}
+		u.app.Preferences().SetString("readingMode", u.readingMode)
+		u.sess.SetReadingMode(u.readingMode)
+		if u.bookID != "" {
+			_ = u.lib.SetReadingMode(u.bookID, u.readingMode)
+		}
+		u.render(u.sess.View())
+		u.prepareAsync()
+	}, u.window)
+}
+
+func (u *readerUI) deleteLibraryBook(id string) {
+	if u.activeRewriteBook == id {
+		u.stopBackgroundRewrite()
+	}
+	if err := u.lib.Delete(id); err != nil {
+		u.showErr(err)
+		return
+	}
+	if u.bookID == id {
+		u.stopPoll()
+		u.bookID = ""
+		u.sess = nil
+		u.readerCard.Hide()
+		u.loadCard.Show()
+	}
+	u.refreshLibraryList()
 }
 
 func (u *readerUI) selectedLibraryBookID() string {

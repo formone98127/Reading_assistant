@@ -1,29 +1,46 @@
-# Reading Assistant
+# Group → Bot forward userbot
 
-Read English sentence-by-sentence; press **↓** for Gemma-powered simplification (local Ollama).
+Forwards every new message from supergroup `-5226298353` to bot `8653334006` using your Telegram account (Telethon userbot).
 
-## Desktop GUI (default)
+## Prerequisites
 
-1. Install [Ollama](https://ollama.com) and pull a model, e.g. `ollama pull gemma4:latest`
-2. Install MinGW for Fyne: `winget install BrechtSanders.WinLibs.POSIX.UCRT`
-3. `go run .` or `.\build.ps1` then `.\reading-assistant.exe`
+1. [my.telegram.org](https://my.telegram.org/apps) — create an app, copy `api_id` and `api_hash`.
+2. Your account must be a member of the source group.
+3. Start a chat with the target bot at least once (open the bot in Telegram and press **Start**).
 
-## Web app (optional)
-
-```powershell
-go run ./cmd/web
-# open http://localhost:8080
-```
+## Setup
 
 ```powershell
-go build -o reading-assistant-web.exe ./cmd/web
+cd c:\Users\Administrator\Reading_assistant
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy .env.example .env
+# Edit .env with TELEGRAM_API_ID and TELEGRAM_API_HASH
 ```
 
-## Environment
+## First run (login)
 
-| Variable | Default |
-|----------|---------|
-| `PORT` / `READING_ASSISTANT_PORT` | `8080` (web only) |
-| `OLLAMA_URL` | `http://127.0.0.1:11434` |
-| `OLLAMA_MODEL` | `gemma4:latest` |
-| `SAVE_DIR` | `~/reading-assistant/saves` |
+```powershell
+python forward_userbot.py
+```
+
+Telethon will prompt for phone number, login code, and 2FA password if enabled. This creates `userbot.session` — keep it private.
+
+## Run in background (Windows)
+
+```powershell
+Start-Process -NoNewWindow python -ArgumentList "forward_userbot.py" -WorkingDirectory (Get-Location)
+```
+
+Or use Task Scheduler / `nssm` for a persistent service.
+
+## Config
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SOURCE_CHAT_ID` | `-5226298353` | Group to watch |
+| `TARGET_BOT_ID` | `8653334006` | Bot user id to receive forwards |
+| `TELEGRAM_SESSION` | `userbot` | Session filename |
+
+Service messages (join/leave/pin) are skipped.

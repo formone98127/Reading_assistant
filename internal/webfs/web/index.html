@@ -9,7 +9,14 @@
 <body>
   <div id="app">
     <header>
+      <p class="header-nav"><a href="/export.html">Export books →</a></p>
       <h1>Reading Assistant</h1>
+      <div class="ollama-row">
+        <label for="ollama-model" class="ollama-label">Local LLM (Ollama)</label>
+        <select id="ollama-model" class="ollama-select" title="Model used for simplify and 中文">
+          <option value="">Loading models…</option>
+        </select>
+      </div>
       <p id="server-status" class="hint">Connecting…</p>
     </header>
 
@@ -23,13 +30,7 @@
           <button type="button" id="btn-open-book" class="btn-secondary">Open selected</button>
           <button type="button" id="btn-export-html" class="btn-ghost">Export HTML</button>
           <button type="button" id="btn-refresh-library" class="btn-ghost">Refresh</button>
-        </div>
-      </div>
-      <div id="rewrite-overlay" class="rewrite-overlay hidden">
-        <div class="rewrite-box">
-          <h2 id="rewrite-title">Rewriting book…</h2>
-          <progress id="rewrite-progress" max="100" value="0"></progress>
-          <p id="rewrite-label">0 / 0 sentences</p>
+          <button type="button" id="btn-delete-book" class="btn-danger">Delete</button>
         </div>
       </div>
       <div class="tabs">
@@ -43,52 +44,81 @@
       <div id="tab-file" class="tab-panel hidden">
         <input type="file" id="file-input" accept=".txt,.epub,.pdf,.mobi,text/plain" />
         <button type="button" id="btn-load-file" class="btn-primary">Add to library &amp; rewrite</button>
+        <p class="hint">Creates english.json (easier 1–3), then chinese.json (繁體). Pick reading view next.</p>
       </div>
       <p id="load-error" class="error hidden"></p>
     </section>
 
-    <section id="reader-panel" class="hidden">
-      <div class="meta">
-        <span id="progress">1 / 1</span>
-        <span id="level-badge">Original</span>
-      </div>
-      <div class="font-size-bar">
-        <span class="font-size-label">Text size</span>
-        <button type="button" id="font-smaller" class="btn-ghost" title="Smaller">A−</button>
-        <input type="range" id="font-slider" min="16" max="180" step="1" value="22" />
-        <button type="button" id="font-larger" class="btn-ghost" title="Larger">A+</button>
-        <span id="font-size-value">22px</span>
-      </div>
-      <div id="prep-status-bar" class="prep-status-bar">
+    <section id="reader-panel" class="hidden html-reader" aria-label="Reader">
+      <header class="html-top-bar">
+        <span id="reader-book-title" class="html-book-title">Reading</span>
+        <div class="html-font-controls">
+          <button type="button" class="html-font-btn" id="font-smaller" aria-label="Smaller text">−</button>
+          <button type="button" class="html-font-btn" id="font-larger" aria-label="Larger text">+</button>
+        </div>
+      </header>
+      <div id="prep-status-bar" class="prep-status-bar html-prep hidden">
+        <progress id="prep-book-progress" class="prep-book-progress" max="100" value="0" aria-label="Library rewrite progress"></progress>
         <div id="prep-spinner" class="prep-spinner hidden"></div>
         <span id="prep-status-text">Starting…</span>
       </div>
-      <div class="reader-scroll">
-        <div class="reading-primary">
-          <p class="compare-label now-label">Now reading</p>
-          <article id="sentence" tabindex="0"></article>
+      <main id="html-reader-main" class="html-reader-main" tabindex="0">
+        <div class="html-reader-stack">
+          <div id="english-zh-stack" class="english-zh-stack">
+            <article id="sentence"></article>
+            <p id="chinese-text" class="chinese-text hidden" lang="zh-Hant" aria-hidden="true"></p>
+          </div>
+          <div id="compare-panel" class="html-easier-panel hidden" aria-hidden="true">
+            <p id="previous-text" class="html-easier-text"></p>
+          </div>
         </div>
-        <div id="compare-panel" class="compare-panel hidden" aria-hidden="true">
-          <p class="compare-label">Original</p>
-          <p id="previous-text" class="compare-text"></p>
-        </div>
-      </div>
-      <p id="status" class="status hidden"></p>
-      <div class="reader-actions">
-        <button type="button" id="btn-prev" class="btn-secondary">← Prev</button>
-        <button type="button" id="btn-harder" class="btn-secondary">↑ Harder</button>
-        <button type="button" id="btn-simplify" class="btn-primary">↓ Simpler</button>
-        <button type="button" id="btn-next" class="btn-secondary">Next →</button>
-      </div>
-      <div class="export-actions">
-        <button type="button" id="btn-dl-original" class="btn-ghost">Download original</button>
-        <button type="button" id="btn-dl-rewritten" class="btn-ghost">Download rewritten</button>
+      </main>
+      <div class="html-level-badge" id="level-badge">Original</div>
+      <div class="html-page-num" id="progress">1 / 1</div>
+      <p class="html-keys-hint" id="html-keys-hint">
+        ↓ prev · ↑ next · ← harder · → simpler · M mode · Esc back
+      </p>
+      <p id="reader-error" class="error html-reader-error hidden"></p>
+      <div class="html-reader-tools">
+        <button type="button" id="btn-new" class="btn-ghost">Back (Esc)</button>
         <button type="button" id="btn-dl-html" class="btn-ghost">Export HTML</button>
-        <button type="button" id="btn-new" class="btn-ghost">New text</button>
       </div>
-      <p class="keys">↓ Simpler · ↑ Harder · → Next · ← Prev</p>
-      <p id="reader-error" class="error hidden"></p>
+      <input type="range" id="font-slider" class="hidden" min="16" max="180" step="1" value="22" aria-hidden="true" />
+      <span id="font-size-value" class="hidden" aria-hidden="true"></span>
+      <span id="reading-mode-badge" class="hidden" aria-hidden="true"></span>
+      <span id="now-reading-label" class="hidden" aria-hidden="true"></span>
+      <span id="compare-label" class="hidden" aria-hidden="true"></span>
+      <button type="button" id="btn-prev" class="hidden" aria-hidden="true"></button>
+      <button type="button" id="btn-next" class="hidden" aria-hidden="true"></button>
+      <button type="button" id="btn-simplify" class="hidden" aria-hidden="true"></button>
+      <button type="button" id="btn-harder" class="hidden" aria-hidden="true"></button>
+      <button type="button" id="btn-dl-original" class="hidden" aria-hidden="true"></button>
+      <button type="button" id="btn-dl-rewritten" class="hidden" aria-hidden="true"></button>
     </section>
+
+    <div id="rewrite-overlay" class="rewrite-overlay hidden" aria-hidden="true">
+      <div class="rewrite-box">
+        <h2 id="rewrite-title">Rewriting book…</h2>
+        <progress id="rewrite-progress" max="100" value="0"></progress>
+        <p id="rewrite-label">0 / 0 sentences</p>
+      </div>
+    </div>
+
+    <div id="reading-mode-overlay" class="html-mode-overlay hidden" tabindex="0" role="dialog" aria-modal="true" aria-labelledby="mode-overlay-title">
+      <div class="html-mode-card">
+        <h2 id="mode-overlay-title" class="html-mode-title">Reading mode</h2>
+        <p class="html-mode-sub">english.json and chinese.json are separate. Pick what to show while reading.</p>
+        <button type="button" class="html-mode-choice" data-mode="english">
+          <span class="html-mode-key">1</span>
+          <span class="html-mode-label">Original + easier 1–3</span>
+        </button>
+        <button type="button" class="html-mode-choice" data-mode="english_chinese">
+          <span class="html-mode-key">2</span>
+          <span class="html-mode-label">Original first — press → for English + 中文</span>
+        </button>
+        <p class="html-mode-keys"><kbd>1</kbd> <kbd>2</kbd> select · <kbd>Enter</kbd> confirm · <kbd>Esc</kbd> close</p>
+      </div>
+    </div>
   </div>
   <script src="app.js"></script>
 </body>
