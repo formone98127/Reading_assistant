@@ -38,7 +38,7 @@ func (u *readerUI) bindKeys() {
 		add(b.key, mod, whenReader, b.fn)
 	}
 
-	add(fyne.KeyEscape, fyne.KeyModifierNone, whenReader, u.exitReader)
+	add(fyne.KeyEscape, 0, whenReader, u.exitReader)
 	add(fyne.KeyM, mod, whenReader, u.showReadingModeDialog)
 
 	add(fyne.KeyMinus, mod, func() bool { return u.readerCard.Visible() }, func() { u.adjustTextSize(-2) })

@@ -69,7 +69,51 @@ func chineseRewriteComplete(p PreparedData, total int) bool {
 	return contiguousChineseDone(p, total) >= total
 }
 
-// RewriteComplete is true when both english.json and chinese.json are complete.
-func RewriteComplete(p PreparedData, total int) bool {
-	return englishRewriteComplete(p, total) && chineseRewriteComplete(p, total)
+func audioRewriteComplete(s *Store, bookID string, total int) bool {
+	if total == 0 {
+		return true
+	}
+	for i := 0; i < total; i++ {
+		if !s.HasAudio(bookID, i) {
+			return false
+		}
+	}
+	return true
+}
+
+func firstIncompleteAudio(s *Store, bookID string, total int) int {
+	for i := 0; i < total; i++ {
+		if !s.HasAudio(bookID, i) {
+			return i
+		}
+	}
+	return total
+}
+
+func contiguousAudioDone(s *Store, bookID string, total int) int {
+	done := 0
+	for i := 0; i < total; i++ {
+		if !s.HasAudio(bookID, i) {
+			break
+		}
+		done = i + 1
+	}
+	return done
+}
+
+// RewriteComplete is true when english, chinese, and optional audio are complete.
+func RewriteComplete(s *Store, bookID string, p PreparedData, total int, ttsEnabled, voiceOnly bool) bool {
+	if voiceOnly {
+		if !ttsEnabled {
+			return true
+		}
+		return audioRewriteComplete(s, bookID, total)
+	}
+	if !englishRewriteComplete(p, total) || !chineseRewriteComplete(p, total) {
+		return false
+	}
+	if ttsEnabled {
+		return audioRewriteComplete(s, bookID, total)
+	}
+	return true
 }

@@ -2,7 +2,7 @@ package library
 
 import "strings"
 
-// PersistPrepared merges English into english.json and 中文 into chinese.json.
+// PersistPrepared merges session rewrites into book.json.
 func (s *Store) PersistPrepared(id string, english map[int]map[int]string, chinese map[int]string) error {
 	prepared, err := s.LoadPrepared(id)
 	if err != nil {
@@ -36,7 +36,10 @@ func (s *Store) PersistPrepared(id string, english map[int]map[int]string, chine
 	total := len(sentences)
 	done := contiguousEnglishDone(prepared, total)
 	status := StatusRewriting
-	if RewriteComplete(prepared, total) {
+	meta, _ := s.LoadMeta(id)
+	ttsEnabled := meta != nil && meta.TTSEnabled
+	voiceOnly := meta != nil && meta.VoiceOnly
+	if RewriteComplete(s, id, prepared, total, ttsEnabled, voiceOnly) {
 		status = StatusDone
 		done = total
 	}

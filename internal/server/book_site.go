@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"strings"
 
-	"reading-assistant/internal/session"
 )
 
 // handleBookReader serves an exported book as a full-page website at /book/{id}.
@@ -19,7 +18,8 @@ func (s *Server) handleBookReader(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/export.html", http.StatusFound)
 		return
 	}
-	_, data, err := s.library.HTMLExportBook(id, r.URL.Query().Get("mode"))
+	q := r.URL.Query()
+	_, data, err := s.library.HTMLExportBook(id, q.Get("mode"), q.Get("showEasier"), q.Get("showChinese"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -39,8 +39,10 @@ func (s *Server) handleLibraryPublish(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id query required", http.StatusBadRequest)
 		return
 	}
-	modeParam := r.URL.Query().Get("mode")
-	path, err := s.library.PublishHTML(bookID, modeParam)
+	q := r.URL.Query()
+	modeParam := q.Get("mode")
+	opts := readingOptionsFromQuery(modeParam, q.Get("showEasier"), q.Get("showChinese"))
+	path, err := s.library.PublishHTML(bookID, modeParam, q.Get("showEasier"), q.Get("showChinese"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -49,10 +51,7 @@ func (s *Server) handleLibraryPublish(w http.ResponseWriter, r *http.Request) {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	siteURL := scheme + "://" + r.Host + "/book/" + bookID
-	if session.NormalizeReadingMode(modeParam) == session.ModeEnglishChinese {
-		siteURL += "?mode=english_chinese"
-	}
+	siteURL := scheme + "://" + r.Host + "/book/" + bookID + exportBookQuery(opts, q.Get("showEasier"), q.Get("showChinese"), modeParam)
 	writeJSON(w, map[string]any{
 		"ok":       true,
 		"path":     path,

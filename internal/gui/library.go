@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
@@ -79,8 +78,7 @@ func (u *readerUI) importAndRewrite(name string, data []byte, text string) {
 		return
 	}
 	title := save.BaseName(name)
-	mode := u.readingMode
-	meta, err := u.lib.Import(title, name, data, parts, mode)
+	meta, err := u.lib.ImportWithOptions(title, name, data, parts, u.readingOptions(), false, false)
 	if err != nil {
 		u.showErr(err)
 		return
@@ -206,15 +204,22 @@ func (u *readerUI) openLibraryBook(bookID string) {
 		u.showErr(err)
 		return
 	}
+	prog, err := u.lib.LoadReadProgress(bookID)
+	if err != nil {
+		u.showErr(err)
+		return
+	}
 	u.sourceDir = u.lib.Dir(bookID)
 	u.sourceBase = "book"
 	u.bookID = bookID
 	u.sess = u.mgr.Create("gui-"+bookID, parts)
 	u.sess.SetBookID(bookID)
 	u.sess.SetSource(u.sourceDir, meta.Title)
-	u.sess.SetReadingMode(meta.ReadingMode)
+	opts := session.ReadingOptions{ShowEasier: prog.ShowEasier, ShowChinese: prog.ShowChinese}
+	u.sess.SetReadingOptions(opts)
+	u.applyReadingOptions(opts)
 	u.sess.SeedPrepared(prepared.English, prepared.Chinese)
-	u.sess.ApplyReadPosition(meta.ReadIndex, meta.ReadLevel)
+	u.sess.ApplyReadPosition(prog.Index, prog.Level)
 	u.loadCard.Hide()
 	u.readerCard.Show()
 	v := u.enrichLibraryView(u.sess.View(), bookID)
@@ -229,7 +234,13 @@ func (u *readerUI) persistLibraryPosition() {
 		return
 	}
 	v := u.sess.View()
-	_ = u.lib.SaveReadPosition(u.bookID, v.Index, v.Level)
+	opts := u.sess.ReadingOptionsValue()
+	_ = u.lib.SaveReadProgress(u.bookID, library.ReadProgress{
+		Index:       v.Index,
+		Level:       v.Level,
+		ShowEasier:  opts.ShowEasier,
+		ShowChinese: opts.ShowChinese,
+	})
 }
 
 func (u *readerUI) saveOnClose() {
@@ -293,35 +304,22 @@ func (u *readerUI) showReadingModeDialog() {
 	if u.sess == nil {
 		return
 	}
-	items := []string{"Original + easier 1–3", "Original → English + 中文 (→ key)"}
-	current := 0
-	if u.readingMode == session.ModeEnglishChinese {
-		current = 1
-	}
-	radio := widget.NewRadioGroup(items, nil)
-	radio.SetSelected(items[current])
-	radio.Horizontal = true
-	content := container.NewVBox(
-		widget.NewLabel("Pick what to show while reading."),
-		widget.NewLabel("Upload writes english.json (easier 1–3) then chinese.json (繁體)."),
-		radio,
-	)
-	dialog.ShowCustomConfirm("Reading mode", "Apply", "Cancel (Esc)", content, func(ok bool) {
+	cur := u.sess.ReadingOptionsValue()
+	chkE := widget.NewCheck("Easier (levels 1–3)", nil)
+	chkC := widget.NewCheck("中文", nil)
+	u.applyReadingOptions(cur)
+	chkE.SetChecked(cur.ShowEasier)
+	chkC.SetChecked(cur.ShowChinese)
+	content := trackOptionsBox(chkE, chkC)
+	dialog.ShowCustomConfirm("Reading version", "Apply", "Cancel (Esc)", content, func(ok bool) {
 		if !ok {
 			return
 		}
-		if radio.Selected == items[1] {
-			u.readingMode = session.ModeEnglishChinese
-		} else {
-			u.readingMode = session.ModeEnglish
-		}
-		u.app.Preferences().SetString("readingMode", u.readingMode)
-		u.sess.SetReadingMode(u.readingMode)
-		if u.bookID != "" {
-			_ = u.lib.SetReadingMode(u.bookID, u.readingMode)
-		}
-		u.render(u.sess.View())
-		u.prepareAsync()
+		u.applyReadingOptions(session.ReadingOptions{
+			ShowEasier:  chkE.Checked,
+			ShowChinese: chkC.Checked,
+		})
+		u.saveReadingPrefs()
 	}, u.window)
 }
 

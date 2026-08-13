@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -56,6 +57,11 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 			s.handleLibraryDelete(w, r)
 			return
 		}
+	case path == "audio":
+		if r.Method == http.MethodGet {
+			s.handleLibraryAudio(w, r)
+			return
+		}
 	}
 	http.Error(w, "not found", http.StatusNotFound)
 }
@@ -66,7 +72,8 @@ func (s *Server) handleLibraryExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id query required", http.StatusBadRequest)
 		return
 	}
-	name, data, err := s.library.HTMLExportBook(id, r.URL.Query().Get("mode"))
+	q := r.URL.Query()
+	name, data, err := s.library.HTMLExportBook(id, q.Get("mode"), q.Get("showEasier"), q.Get("showChinese"))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -101,26 +108,34 @@ func (s *Server) handleLibraryBook(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLibraryOpen(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		BookID string `json:"bookId"`
+		BookID      string `json:"bookId"`
+		ShowEasier  *bool  `json:"showEasier"`
+		ShowChinese *bool  `json:"showChinese"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BookID == "" {
 		http.Error(w, "bookId required", http.StatusBadRequest)
 		return
 	}
-	sess, meta, sid, err := s.openLibrarySession(req.BookID)
+	opts := readingOptionsFromJSON(req.ShowEasier, req.ShowChinese, "")
+	restoreSaved := req.ShowEasier == nil && req.ShowChinese == nil
+	sess, meta, sid, err := s.openLibrarySession(req.BookID, opts, restoreSaved)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	s.prepareWhileReading(sess)
 	s.ensureLibraryRewrite(meta)
+	o := sess.ReadingOptionsValue()
 	writeJSON(w, map[string]any{
 		"sessionId":      sid,
 		"total":          len(sess.Sentences),
 		"state":          s.enrichView(sess, sess.View()),
 		"bookId":         meta.ID,
 		"sourceFilename": meta.Title,
-		"readingMode":    meta.ReadingMode,
+		"readingMode":    session.ModeFromOptions(o),
+		"track":          o.NavTrack(),
+		"showEasier":     o.ShowEasier,
+		"showChinese":    o.ShowChinese,
 	})
 }
 
@@ -153,8 +168,14 @@ func (s *Server) handleLibraryImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	title := save.BaseName(filename)
-	mode := session.NormalizeReadingMode(r.FormValue("readingMode"))
-	meta, err := s.library.Import(title, filename, data, parts, mode)
+	opts := readingOptionsFromForm(r)
+	voiceOnly := r.FormValue("voiceOnly") == "true"
+	ttsEnabled := r.FormValue("generateVoice") != "false"
+	if voiceOnly {
+		ttsEnabled = true
+		opts = session.ReadingOptions{}
+	}
+	meta, err := s.library.ImportWithOptions(title, filename, data, parts, opts, ttsEnabled, voiceOnly)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -167,10 +188,17 @@ func (s *Server) handleLibraryImport(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) openLibrarySession(bookID string) (*session.Session, *library.Meta, string, error) {
+func (s *Server) openLibrarySession(bookID string, opts session.ReadingOptions, restoreSaved bool) (*session.Session, *library.Meta, string, error) {
 	meta, err := s.library.LoadMeta(bookID)
 	if err != nil {
 		return nil, nil, "", err
+	}
+	prog, err := s.library.LoadReadProgress(bookID)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if restoreSaved {
+		opts = session.ReadingOptions{ShowEasier: prog.ShowEasier, ShowChinese: prog.ShowChinese}
 	}
 	parts, err := s.library.LoadSentences(bookID)
 	if err != nil {
@@ -180,13 +208,15 @@ func (s *Server) openLibrarySession(bookID string) (*session.Session, *library.M
 	if err != nil {
 		return nil, nil, "", err
 	}
+	_ = s.library.SetReadingOptions(bookID, opts)
+	meta, _ = s.library.LoadMeta(bookID)
 	sid := newSessionID()
 	sess := s.manager.Create(sid, parts)
 	sess.SetBookID(bookID)
 	sess.SetSource(s.library.Dir(bookID), meta.Title)
-	sess.SetReadingMode(meta.ReadingMode)
+	sess.SetReadingOptions(opts)
 	sess.SeedPrepared(prepared.English, prepared.Chinese)
-	sess.ApplyReadPosition(meta.ReadIndex, meta.ReadLevel)
+	sess.ApplyReadPosition(prog.Index, prog.Level)
 	return sess, meta, sid, nil
 }
 
@@ -197,6 +227,36 @@ func (s *Server) cancelLibraryRewrite(bookID string) {
 		delete(s.rewriteCancel, bookID)
 	}
 	s.rewriteMu.Unlock()
+}
+
+func (s *Server) handleLibraryAudio(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id query required", http.StatusBadRequest)
+		return
+	}
+	idxStr := r.URL.Query().Get("index")
+	if idxStr == "" {
+		http.Error(w, "index query required", http.StatusBadRequest)
+		return
+	}
+	idx, err := strconv.Atoi(idxStr)
+	if err != nil || idx < 0 {
+		http.Error(w, "invalid index", http.StatusBadRequest)
+		return
+	}
+	if !s.library.HasAudio(id, idx) {
+		http.Error(w, "audio not found", http.StatusNotFound)
+		return
+	}
+	data, err := s.library.LoadAudio(id, idx)
+	if err != nil {
+		http.Error(w, "audio not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) handleLibraryDelete(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +310,7 @@ func (s *Server) startLibraryRewrite(bookID string) {
 func (s *Server) ensureLibraryRewrite(meta *library.Meta) {
 	if meta.RewriteStatus == library.StatusDone {
 		prepared, err := s.library.LoadPrepared(meta.ID)
-		if err == nil && !library.RewriteComplete(prepared, meta.TotalSentences) {
+		if err == nil && !library.RewriteComplete(s.library, meta.ID, prepared, meta.TotalSentences, meta.TTSEnabled, meta.VoiceOnly) {
 			s.startLibraryRewrite(meta.ID)
 			return
 		}
@@ -276,5 +336,11 @@ func (s *Server) persistReadPosition(sess *session.Session) {
 		return
 	}
 	v := sess.View()
-	_ = s.library.SaveReadPosition(bookID, v.Index, v.Level)
+	opts := sess.ReadingOptionsValue()
+	_ = s.library.SaveReadProgress(bookID, library.ReadProgress{
+		Index:       v.Index,
+		Level:       v.Level,
+		ShowEasier:  opts.ShowEasier,
+		ShowChinese: opts.ShowChinese,
+	})
 }

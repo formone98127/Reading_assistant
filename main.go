@@ -10,6 +10,10 @@ import (
 func main() {
 	cfg := config.Load()
 	log.Printf("Reading Assistant (desktop)")
-	log.Printf("Ollama: %s  model: %s", cfg.OllamaURL, cfg.OllamaModel)
+	if config.NormalizeLLMProvider(cfg.LLMProvider) == config.LLMProviderFreebuff {
+		log.Printf("FreeBuff: %s  model: %s", cfg.FreebuffURL, cfg.FreebuffModel)
+	} else {
+		log.Printf("Ollama: %s  model: %s", cfg.OllamaURL, cfg.OllamaModel)
+	}
 	gui.Run(cfg)
 }

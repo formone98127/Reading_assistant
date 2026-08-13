@@ -35,20 +35,20 @@ type Server struct {
 }
 
 func New(cfg config.Config, static http.Handler) *Server {
-	llm := &simplify.Client{
-		BaseURL: cfg.OllamaURL,
-		Model:   cfg.OllamaModel,
-	}
+	llm := &simplify.Client{}
+	applyLLMConfig(cfg, llm)
 	lib := library.NewStore(cfg.SaveDir)
+	rw := &library.Rewriter{
+		Store: lib,
+		LLM:   llm,
+	}
+	applyRewriterTTS(cfg, rw)
 	return &Server{
-		cfg:     cfg,
-		llm:     llm,
-		manager: session.NewManager(llm),
-		library: lib,
-		rewriter: &library.Rewriter{
-			Store: lib,
-			LLM:   llm,
-		},
+		cfg:      cfg,
+		llm:      llm,
+		manager:  session.NewManager(llm),
+		library:  lib,
+		rewriter: rw,
 		rewriteCancel: make(map[string]context.CancelFunc),
 		static:        static,
 	}
@@ -57,24 +57,34 @@ func New(cfg config.Config, static http.Handler) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/llm", s.handleLLM)
 	mux.HandleFunc("/api/ollama", s.handleOllama)
 	mux.HandleFunc("/api/load", s.handleLoad)
 	mux.HandleFunc("/api/easier", s.handleEasier)
 	mux.HandleFunc("/api/harder", s.handleHarder)
 	mux.HandleFunc("/api/next", s.handleNext)
 	mux.HandleFunc("/api/prev", s.handlePrev)
+	mux.HandleFunc("/api/goto", s.handleGoto)
 	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/api/rsvp-text", s.handleRsvpText)
 	mux.HandleFunc("/api/save", s.handleSave)
 	mux.HandleFunc("/api/export/", s.handleExport)
 	mux.HandleFunc("/api/library", s.handleLibrary)
 	mux.HandleFunc("/api/library/", s.handleLibrary)
+	mux.HandleFunc("/api/public", s.handlePublicAPI)
+	mux.HandleFunc("/api/public/", s.handlePublicAPI)
 	mux.HandleFunc("/api/progress", s.handleSaveProgress)
 	mux.HandleFunc("/api/reading-mode", s.handleReadingMode)
+	mux.HandleFunc("/api/tts", s.handleTTS)
 	mux.HandleFunc("/book/", s.handleBookReader)
+	mux.HandleFunc("/shared/", s.handleSharedBook)
 	mux.Handle("/export", webfs.ExportHubHandler())
 	mux.Handle("/export.html", webfs.ExportHubHandler())
 	mux.Handle("/export.js", webfs.ExportHubHandler())
 	mux.Handle("/export.css", webfs.ExportHubHandler())
+	mux.Handle("/public", webfs.PublicHubHandler())
+	mux.Handle("/public.html", webfs.PublicHubHandler())
+	mux.Handle("/public.js", webfs.PublicHubHandler())
 	if s.static != nil {
 		mux.Handle("/", s.static)
 	}
@@ -82,10 +92,16 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
 	writeJSON(w, map[string]any{
-		"ok":     true,
-		"model":  s.currentModel(),
-		"ollama": s.cfg.OllamaURL,
+		"ok":       true,
+		"provider": config.NormalizeLLMProvider(cfg.LLMProvider),
+		"model":    config.LLMModel(cfg),
+		"url":      config.LLMBaseURL(cfg),
+		"ollama":   cfg.OllamaURL,
+		"voxcpmUrl": cfg.VoxCPMURL,
 	})
 }
 
@@ -100,11 +116,13 @@ func (s *Server) handleLoad(w http.ResponseWriter, r *http.Request) {
 	var text string
 	var filename string
 
-	readingMode := session.ModeEnglish
+	var readOpts session.ReadingOptions
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var req struct {
 			Text        string `json:"text"`
 			ReadingMode string `json:"readingMode"`
+			ShowEasier  *bool  `json:"showEasier"`
+			ShowChinese *bool  `json:"showChinese"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -112,13 +130,13 @@ func (s *Server) handleLoad(w http.ResponseWriter, r *http.Request) {
 		}
 		text = parser.FromPlain(req.Text)
 		filename = "paste.txt"
-		readingMode = session.NormalizeReadingMode(req.ReadingMode)
+		readOpts = readingOptionsFromJSON(req.ShowEasier, req.ShowChinese, req.ReadingMode)
 	} else {
 		if err := r.ParseMultipartForm(maxBody); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		readingMode = session.NormalizeReadingMode(r.FormValue("readingMode"))
+		readOpts = readingOptionsFromForm(r)
 		if pasted := r.FormValue("text"); pasted != "" {
 			text = parser.FromPlain(pasted)
 			filename = "paste.txt"
@@ -149,7 +167,7 @@ func (s *Server) handleLoad(w http.ResponseWriter, r *http.Request) {
 	}
 	id := newSessionID()
 	sess := s.manager.Create(id, parts)
-	sess.SetReadingMode(readingMode)
+	sess.SetReadingOptions(readOpts)
 	base := save.BaseName(filename)
 	dir := filepath.Join(s.cfg.SaveDir, base)
 	sess.SetSource(dir, filename)
@@ -203,12 +221,14 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		}
 		v := sess.View()
 		sentencesOut := save.BuildReaderSentences(sess.Sentences, sess.PreparedSnapshot(), sess.ChineseSnapshot(), session.MaxLevel)
+		o := sess.ReadingOptionsValue()
+		o = save.EffectiveExportOptions(o, sentencesOut)
 		data, err := save.BuildBookHTML(save.ReaderExport{
 			Title:       base,
 			StartIndex:  v.Index,
 			StartLevel:  v.Level,
 			MaxLevel:    session.MaxLevel,
-			ReadingMode: save.EffectiveExportReadingMode(sess.ReadingModeValue(), sentencesOut),
+			ReadingMode: session.ModeFromOptions(o),
 			Sentences:   sentencesOut,
 		})
 		if err != nil {
@@ -352,12 +372,53 @@ func (s *Server) handlePrev(w http.ResponseWriter, r *http.Request) {
 	s.persistReadPosition(sess)
 }
 
+func (s *Server) handleGoto(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sess, ok := s.sessionFromRequest(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Page int `json:"page"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Page < 1 {
+		http.Error(w, "invalid page", http.StatusBadRequest)
+		return
+	}
+	state := sess.GoTo(req.Page - 1)
+	s.prepareWhileReading(sess)
+	writeJSON(w, map[string]any{"state": s.enrichView(sess, state)})
+	s.persistReadPosition(sess)
+}
+
 func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.sessionFromRequest(w, r)
 	if !ok {
 		return
 	}
 	writeJSON(w, map[string]any{"state": s.enrichView(sess, sess.View())})
+}
+
+func (s *Server) handleRsvpText(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sess, ok := s.sessionFromRequest(w, r)
+	if !ok {
+		return
+	}
+	s.refreshSessionFromLibrary(sess)
+	v := sess.View()
+	writeJSON(w, map[string]any{
+		"level":     v.Level,
+		"index":     v.Index,
+		"total":     v.Total,
+		"sentences": sess.TextsAtUnifiedLevel(v.Level),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -373,13 +434,16 @@ func (s *Server) prepareWhileReading(sess *session.Session) {
 	if sess.BookIDValue() != "" {
 		return
 	}
-	if session.ChineseEnabled(sess.ReadingModeValue()) {
-		return
-	}
+	o := sess.ReadingOptionsValue()
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		sess.PrepareWhileReading(ctx, s.llm)
+		if o.ShowEasier {
+			sess.PrepareWhileReading(ctx, s.llm)
+		}
+		if o.ShowChinese {
+			sess.PrepareChinese(ctx, s.llm, sess.View().Index)
+		}
 	}()
 }
 

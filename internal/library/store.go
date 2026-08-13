@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"reading-assistant/internal/save"
@@ -23,25 +24,49 @@ const (
 
 // Meta describes a saved book bundle on disk.
 type Meta struct {
-	ID             string    `json:"id"`
-	Title          string    `json:"title"`
-	SourceFile     string    `json:"sourceFile"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
-	TotalSentences int       `json:"totalSentences"`
-	RewriteDone    int       `json:"rewriteDone"`
-	RewriteStatus  string    `json:"rewriteStatus"`
-	RewriteError   string    `json:"rewriteError,omitempty"`
-	ReadIndex      int       `json:"readIndex"`
-	ReadLevel           int       `json:"readLevel"`
-	ReadingMode         string    `json:"readingMode,omitempty"`
-	ChineseRewriteDone  int       `json:"chineseRewriteDone,omitempty"`
+	ID                 string    `json:"id"`
+	Title              string    `json:"title"`
+	SourceFile         string    `json:"sourceFile"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
+	TotalSentences     int       `json:"totalSentences"`
+	RewriteDone        int       `json:"rewriteDone"`
+	RewriteStatus      string    `json:"rewriteStatus"`
+	RewriteError       string    `json:"rewriteError,omitempty"`
+	ReadIndex          int       `json:"readIndex"`
+	ReadLevel          int       `json:"readLevel"`
+	ReadingMode        string    `json:"readingMode,omitempty"`
+	ShowEasier         bool      `json:"showEasier"`
+	ShowChinese        bool      `json:"showChinese"`
+	ChineseRewriteDone int       `json:"chineseRewriteDone,omitempty"`
+	AudioRewriteDone   int       `json:"audioRewriteDone,omitempty"`
+	AudioGenerating    bool      `json:"audioGenerating,omitempty"`
+	TTSEnabled         bool      `json:"ttsEnabled,omitempty"`
+	VoiceOnly          bool      `json:"voiceOnly,omitempty"`
+}
+
+// ResolvedOptions returns checkbox flags, migrating legacy readingMode when needed.
+func (m *Meta) ResolvedOptions() session.ReadingOptions {
+	if m == nil {
+		return session.ReadingOptions{ShowEasier: true}
+	}
+	if m.ShowEasier || m.ShowChinese {
+		return session.ReadingOptions{ShowEasier: m.ShowEasier, ShowChinese: m.ShowChinese}
+	}
+	return session.OptionsFromMode(m.ReadingMode)
 }
 
 // Store manages the on-disk book library.
-// English easier levels: english.json. 繁體 中文: chinese.json (separate files).
+// Rewrite data: book.json (original + easier levels + 中文 per sentence).
+// Reading position: progress.json. Catalog: meta.json.
 type Store struct {
-	Root string
+	Root  string
+	locks sync.Map // book id -> *sync.Mutex
+}
+
+func (s *Store) bookLock(id string) *sync.Mutex {
+	v, _ := s.locks.LoadOrStore(id, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 func NewStore(root string) *Store {
@@ -64,10 +89,19 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// Import saves a new book bundle (source file + sentences).
+// Import saves a new book bundle (legacy readingMode string).
 func (s *Store) Import(title, sourceFilename string, sourceData []byte, sentences []string, readingMode string) (*Meta, error) {
+	return s.ImportWithOptions(title, sourceFilename, sourceData, sentences, session.OptionsFromMode(readingMode), false, false)
+}
+
+// ImportWithOptions saves a new book bundle with Easier / 中文 display flags.
+func (s *Store) ImportWithOptions(title, sourceFilename string, sourceData []byte, sentences []string, opts session.ReadingOptions, ttsEnabled, voiceOnly bool) (*Meta, error) {
 	if len(sentences) == 0 {
 		return nil, fmt.Errorf("no sentences")
+	}
+	if voiceOnly {
+		ttsEnabled = true
+		opts = session.ReadingOptions{}
 	}
 	id := newID()
 	dir := s.bookDir(id)
@@ -82,13 +116,7 @@ func (s *Store) Import(title, sourceFilename string, sourceData []byte, sentence
 	if err := os.WriteFile(filepath.Join(dir, srcName), sourceData, 0o644); err != nil {
 		return nil, err
 	}
-	if err := writeJSON(filepath.Join(dir, "sentences.json"), sentences); err != nil {
-		return nil, err
-	}
-	if err := writeJSON(filepath.Join(dir, englishLevelsFile), map[string]map[string]string{}); err != nil {
-		return nil, err
-	}
-	if err := writeJSON(filepath.Join(dir, chineseFile), map[string]string{}); err != nil {
+	if err := s.saveBook(id, newBookFile(title, sentences)); err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
@@ -100,9 +128,19 @@ func (s *Store) Import(title, sourceFilename string, sourceData []byte, sentence
 		UpdatedAt:      now,
 		TotalSentences: len(sentences),
 		RewriteStatus:  StatusPending,
-		ReadingMode: session.NormalizeReadingMode(readingMode),
+		ReadingMode:    session.ModeFromOptions(opts),
+		ShowEasier:     opts.ShowEasier,
+		ShowChinese:    opts.ShowChinese,
+		TTSEnabled:     ttsEnabled,
+		VoiceOnly:      voiceOnly,
 	}
 	if err := s.saveMeta(meta); err != nil {
+		return nil, err
+	}
+	if err := s.SaveReadProgress(id, ReadProgress{
+		ShowEasier:  opts.ShowEasier,
+		ShowChinese: opts.ShowChinese,
+	}); err != nil {
 		return nil, err
 	}
 	if _, err := save.WriteOriginal(dir, "book", sentences); err != nil {
@@ -145,74 +183,196 @@ func (s *Store) List() ([]Meta, error) {
 }
 
 func (s *Store) LoadMeta(id string) (*Meta, error) {
-	data, err := os.ReadFile(filepath.Join(s.bookDir(id), "meta.json"))
+	if err := validateBookID(id); err != nil {
+		return nil, err
+	}
+	s.bookLock(id).Lock()
+	defer s.bookLock(id).Unlock()
+	m, err := s.readMeta(id)
 	if err != nil {
 		return nil, err
 	}
-	var m Meta
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
-	}
+	_ = s.reconcileMetaProgress(&m)
 	return &m, nil
 }
 
+func (s *Store) readMeta(id string) (Meta, error) {
+	data, err := os.ReadFile(filepath.Join(s.bookDir(id), "meta.json"))
+	if err != nil {
+		return Meta{}, err
+	}
+	var m Meta
+	if err := json.Unmarshal(data, &m); err != nil {
+		// Repair: scan for trailing garbage after first complete JSON object.
+		if fixed := salvageMetaJSON(data); fixed != nil {
+			if err2 := json.Unmarshal(fixed, &m); err2 == nil {
+				_ = os.WriteFile(filepath.Join(s.bookDir(id), "meta.json"), fixed, 0o644)
+				return m, nil
+			}
+		}
+		return Meta{}, err
+	}
+	return m, nil
+}
+
+// salvageMetaJSON strips garbage bytes trailing the first complete top-level JSON object.
+func salvageMetaJSON(raw []byte) []byte {
+	// Find the closing } of the first top-level object by tracking depth.
+	depth := 0
+	end := -1
+	for i, b := range raw {
+		switch b {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				end = i + 1
+				goto out
+			}
+		}
+	}
+out:
+	if end <= 0 || end >= len(raw) {
+		return nil
+	}
+	fixed := make([]byte, end)
+	copy(fixed, raw[:end])
+	// Re-indent so the file looks consistent
+	var v any
+	if err := json.Unmarshal(fixed, &v); err != nil {
+		return nil
+	}
+	out, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil
+	}
+	out = append(out, '\n')
+	return out
+}
+
 func (s *Store) saveMeta(m *Meta) error {
+	if err := validateBookID(m.ID); err != nil {
+		return err
+	}
+	s.bookLock(m.ID).Lock()
+	defer s.bookLock(m.ID).Unlock()
+	return s.writeMeta(m)
+}
+
+func (s *Store) writeMeta(m *Meta) error {
 	m.UpdatedAt = time.Now().UTC()
 	return writeJSON(filepath.Join(s.bookDir(m.ID), "meta.json"), m)
 }
 
-func (s *Store) LoadSentences(id string) ([]string, error) {
-	var sentences []string
-	if err := readJSON(filepath.Join(s.bookDir(id), "sentences.json"), &sentences); err != nil {
-		return nil, err
+func (s *Store) updateMeta(id string, fn func(*Meta) error) error {
+	if err := validateBookID(id); err != nil {
+		return err
 	}
-	return sentences, nil
+	s.bookLock(id).Lock()
+	defer s.bookLock(id).Unlock()
+	m, err := s.readMeta(id)
+	if err != nil {
+		return err
+	}
+	if err := fn(&m); err != nil {
+		return err
+	}
+	return s.writeMeta(&m)
 }
 
-// LoadPrepared returns English (english.json) and 中文 (chinese.json).
+// reconcileMetaProgress repairs stale progress counters from english.json/chinese.json.
+// This prevents completed books from staying "busy" because meta.json missed the
+// final chineseRewriteDone write.
+func (s *Store) reconcileMetaProgress(m *Meta) error {
+	if m == nil || m.ID == "" || m.TotalSentences <= 0 {
+		return nil
+	}
+	_ = s.migrateLegacyLevels(m.ID)
+	english, err := s.loadEnglishLevels(m.ID)
+	if err != nil {
+		return err
+	}
+	chinese, err := s.loadChinese(m.ID)
+	if err != nil {
+		return err
+	}
+	prepared := PreparedData{English: english, Chinese: chinese}
+	engDone := contiguousEnglishDone(prepared, m.TotalSentences)
+	zhDone := contiguousChineseDone(prepared, m.TotalSentences)
+
+	changed := false
+	if engDone > m.RewriteDone {
+		m.RewriteDone = engDone
+		changed = true
+	}
+	if zhDone > m.ChineseRewriteDone {
+		m.ChineseRewriteDone = zhDone
+		changed = true
+	}
+	if m.TTSEnabled {
+		audDone := contiguousAudioDone(s, m.ID, m.TotalSentences)
+		if audDone > m.AudioRewriteDone {
+			m.AudioRewriteDone = audDone
+			changed = true
+		}
+	}
+	if RewriteComplete(s, m.ID, prepared, m.TotalSentences, m.TTSEnabled, m.VoiceOnly) && m.RewriteStatus != StatusDone {
+		m.RewriteDone = m.TotalSentences
+		m.ChineseRewriteDone = m.TotalSentences
+		if m.TTSEnabled {
+			m.AudioRewriteDone = contiguousAudioDone(s, m.ID, m.TotalSentences)
+		}
+		m.RewriteStatus = StatusDone
+		m.RewriteError = ""
+		changed = true
+	}
+	if m.RewriteStatus == StatusDone && m.ChineseRewriteDone < m.TotalSentences && zhDone >= m.TotalSentences {
+		m.ChineseRewriteDone = m.TotalSentences
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return s.writeMeta(m)
+}
+
+func (s *Store) LoadSentences(id string) ([]string, error) {
+	book, err := s.LoadBook(id)
+	if err != nil {
+		return nil, err
+	}
+	return bookOriginals(book), nil
+}
+
+// LoadPrepared returns easier English and 中文 from book.json.
 func (s *Store) LoadPrepared(id string) (PreparedData, error) {
-	_ = s.migrateLegacyLevels(id)
-	english, err := s.loadEnglishLevels(id)
+	book, err := s.LoadBook(id)
 	if err != nil {
 		return PreparedData{}, err
 	}
-	chinese, err := s.loadChinese(id)
-	if err != nil {
-		return PreparedData{}, err
-	}
-	if english == nil {
-		english = map[int]map[int]string{}
-	}
-	if chinese == nil {
-		chinese = map[int]string{}
-	}
-	return PreparedData{English: english, Chinese: chinese}, nil
+	return bookToPrepared(book), nil
 }
 
 func (s *Store) SaveSentenceLevels(id string, idx int, levels map[int]string) error {
-	raw := map[string]map[string]string{}
-	path := s.englishLevelsPath(id)
-	_ = readJSON(path, &raw)
-	key := fmt.Sprintf("%d", idx)
-	out := make(map[string]string)
-	for lv, txt := range levels {
-		out[fmt.Sprintf("%d", lv)] = txt
-	}
-	raw[key] = out
-	return writeJSON(path, raw)
+	return s.updateBookSentence(id, idx, func(sent *save.ReaderSentence) error {
+		if len(sent.Levels) < session.MaxLevel {
+			sent.Levels = make([]string, session.MaxLevel)
+		}
+		for lv, txt := range levels {
+			if lv >= 1 && lv <= session.MaxLevel {
+				sent.Levels[lv-1] = txt
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) SaveChinese(id string, idx int, text string) error {
-	raw := map[string]string{}
-	path := s.chinesePath(id)
-	_ = readJSON(path, &raw)
-	key := fmt.Sprintf("%d", idx)
-	if strings.TrimSpace(text) == "" {
-		delete(raw, key)
-	} else {
-		raw[key] = text
-	}
-	return writeJSON(path, raw)
+	return s.updateBookSentence(id, idx, func(sent *save.ReaderSentence) error {
+		sent.Chinese = strings.TrimSpace(text)
+		return nil
+	})
 }
 
 func (s *Store) SaveRewrittenFile(id string, sentences []string, prepared PreparedData) error {
@@ -239,36 +399,37 @@ func rewrittenParagraphs(sentences []string, prepared map[int]map[int]string) []
 }
 
 func (s *Store) SetReadingMode(id, mode string) error {
-	m, err := s.LoadMeta(id)
+	return s.SetReadingOptions(id, session.OptionsFromMode(mode))
+}
+
+func (s *Store) SetReadingOptions(id string, o session.ReadingOptions) error {
+	p, err := s.LoadReadProgress(id)
 	if err != nil {
 		return err
 	}
-	m.ReadingMode = session.NormalizeReadingMode(mode)
-	return s.saveMeta(m)
+	p.ShowEasier = o.ShowEasier
+	p.ShowChinese = o.ShowChinese
+	return s.SaveReadProgress(id, p)
 }
 
 func (s *Store) SetChineseProgress(id string, done int) error {
-	m, err := s.LoadMeta(id)
-	if err != nil {
-		return err
-	}
-	m.ChineseRewriteDone = done
-	if m.TotalSentences > 0 && done < m.TotalSentences && m.RewriteDone >= m.TotalSentences {
-		m.RewriteStatus = StatusRewriting
-	}
-	return s.saveMeta(m)
+	return s.updateMeta(id, func(m *Meta) error {
+		m.ChineseRewriteDone = done
+		if m.TotalSentences > 0 && done < m.TotalSentences && m.RewriteDone >= m.TotalSentences {
+			m.RewriteStatus = StatusRewriting
+		}
+		return nil
+	})
 }
 
 func (s *Store) SetRewriteProgress(id string, done, total int, status, errMsg string) error {
-	m, err := s.LoadMeta(id)
-	if err != nil {
-		return err
-	}
-	m.RewriteDone = done
-	m.TotalSentences = total
-	m.RewriteStatus = status
-	m.RewriteError = errMsg
-	return s.saveMeta(m)
+	return s.updateMeta(id, func(m *Meta) error {
+		m.RewriteDone = done
+		m.TotalSentences = total
+		m.RewriteStatus = status
+		m.RewriteError = errMsg
+		return nil
+	})
 }
 
 // Delete removes a book bundle from the library.
@@ -291,16 +452,6 @@ func validateBookID(id string) error {
 		return fmt.Errorf("invalid book id")
 	}
 	return nil
-}
-
-func (s *Store) SaveReadPosition(id string, index, level int) error {
-	m, err := s.LoadMeta(id)
-	if err != nil {
-		return err
-	}
-	m.ReadIndex = index
-	m.ReadLevel = level
-	return s.saveMeta(m)
 }
 
 func writeJSON(path string, v any) error {

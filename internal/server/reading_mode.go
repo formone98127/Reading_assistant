@@ -3,8 +3,6 @@ package server
 import (
 	"encoding/json"
 	"net/http"
-
-	"reading-assistant/internal/session"
 )
 
 func (s *Server) handleReadingMode(w http.ResponseWriter, r *http.Request) {
@@ -18,18 +16,25 @@ func (s *Server) handleReadingMode(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		ReadingMode string `json:"readingMode"`
+		Track       string `json:"track"`
+		ShowEasier  *bool  `json:"showEasier"`
+		ShowChinese *bool  `json:"showChinese"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	mode := session.NormalizeReadingMode(req.ReadingMode)
-	sess.SetReadingMode(mode)
+	opts := readingOptionsFromJSON(req.ShowEasier, req.ShowChinese, req.ReadingMode)
+	if req.Track != "" {
+		opts = mergeReadingOptions(opts, req.Track)
+	}
+	sess.SetReadingOptions(opts)
 	if bookID := sess.BookIDValue(); bookID != "" {
-		if err := s.library.SetReadingMode(bookID, mode); err != nil {
+		if err := s.library.SetReadingOptions(bookID, opts); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.persistReadPosition(sess)
 		if meta, err := s.library.LoadMeta(bookID); err == nil {
 			s.ensureLibraryRewrite(meta)
 		}

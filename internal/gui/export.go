@@ -75,12 +75,14 @@ func (u *readerUI) exportSessionHTML() {
 	}
 	v := u.sess.View()
 	sentencesOut := save.BuildReaderSentences(u.sess.Sentences, u.sess.PreparedSnapshot(), u.sess.ChineseSnapshot(), session.MaxLevel)
+	o := u.sess.ReadingOptionsValue()
+	o = save.EffectiveExportOptions(o, sentencesOut)
 	data, err := save.BuildBookHTML(save.ReaderExport{
 		Title:       title,
 		StartIndex:  v.Index,
 		StartLevel:  v.Level,
 		MaxLevel:    session.MaxLevel,
-		ReadingMode: save.EffectiveExportReadingMode(u.sess.ReadingModeValue(), sentencesOut),
+		ReadingMode: session.ModeFromOptions(o),
 		Sentences:   sentencesOut,
 	})
 	if err != nil {

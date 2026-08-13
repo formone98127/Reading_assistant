@@ -12,7 +12,19 @@ func RewriteProgressActive(m *Meta) bool {
 	case StatusPending, StatusRewriting:
 		return true
 	case StatusDone:
-		return m.RewriteDone < m.TotalSentences || m.ChineseRewriteDone < m.TotalSentences
+		if m.VoiceOnly {
+			if m.TTSEnabled && m.AudioRewriteDone < m.TotalSentences {
+				return true
+			}
+			return false
+		}
+		if m.RewriteDone < m.TotalSentences || m.ChineseRewriteDone < m.TotalSentences {
+			return true
+		}
+		if m.TTSEnabled && m.AudioRewriteDone < m.TotalSentences {
+			return true
+		}
+		return false
 	default:
 		return false
 	}
@@ -27,6 +39,16 @@ func StatusLabel(m *Meta) string {
 	case StatusPending:
 		return "queued"
 	case StatusRewriting:
+		if m.VoiceOnly && m.TTSEnabled && m.TotalSentences > 0 {
+			return fmt.Sprintf("voice %d/%d", m.AudioRewriteDone, m.TotalSentences)
+		}
+		if m.TotalSentences > 0 &&
+			m.RewriteDone >= m.TotalSentences &&
+			m.ChineseRewriteDone >= m.TotalSentences &&
+			m.TTSEnabled &&
+			m.AudioRewriteDone < m.TotalSentences {
+			return fmt.Sprintf("voice %d/%d", m.AudioRewriteDone, m.TotalSentences)
+		}
 		if m.TotalSentences > 0 &&
 			m.RewriteDone >= m.TotalSentences &&
 			m.ChineseRewriteDone < m.TotalSentences {
@@ -37,11 +59,20 @@ func StatusLabel(m *Meta) string {
 		}
 		return "rewriting"
 	case StatusDone:
+		if m.VoiceOnly {
+			if m.TTSEnabled && m.TotalSentences > 0 && m.AudioRewriteDone < m.TotalSentences {
+				return fmt.Sprintf("voice %d/%d", m.AudioRewriteDone, m.TotalSentences)
+			}
+			return "ready"
+		}
 		if m.TotalSentences > 0 && m.ChineseRewriteDone < m.TotalSentences {
 			return fmt.Sprintf("chinese %d/%d", m.ChineseRewriteDone, m.TotalSentences)
 		}
 		if m.TotalSentences > 0 && m.RewriteDone < m.TotalSentences {
 			return fmt.Sprintf("english %d/%d", m.RewriteDone, m.TotalSentences)
+		}
+		if m.TTSEnabled && m.TotalSentences > 0 && m.AudioRewriteDone < m.TotalSentences {
+			return fmt.Sprintf("voice %d/%d", m.AudioRewriteDone, m.TotalSentences)
 		}
 		return "ready"
 	case StatusError:

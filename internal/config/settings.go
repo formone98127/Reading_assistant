@@ -8,7 +8,15 @@ import (
 
 // UserSettings is persisted under the save directory.
 type UserSettings struct {
-	OllamaModel string `json:"ollamaModel,omitempty"`
+	LLMProvider    string `json:"llmProvider,omitempty"`    // ollama | freebuff
+	OllamaModel    string `json:"ollamaModel,omitempty"`
+	FreebuffURL    string `json:"freebuffUrl,omitempty"`
+	FreebuffModel  string `json:"freebuffModel,omitempty"`
+	FreebuffAPIKey string `json:"freebuffApiKey,omitempty"`
+	VoxCPMURL      string  `json:"voxcpmUrl,omitempty"`
+	VoxCPMControl  string  `json:"voxcpmControl,omitempty"`
+	VoxCPMCfg      float64 `json:"voxcpmCfg,omitempty"`
+	VoxCPMTimesteps int    `json:"voxcpmTimesteps,omitempty"`
 }
 
 func SettingsPath(saveDir string) string {

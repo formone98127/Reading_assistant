@@ -12,8 +12,10 @@ import (
 )
 
 type Client struct {
+	Backend Backend
 	BaseURL string
 	Model   string
+	APIKey  string // optional; Freebuff2API when API_KEYS is set
 	HTTP    *http.Client
 }
 
@@ -62,6 +64,15 @@ func singleOptions() map[string]any {
 }
 
 func (c *Client) chat(ctx context.Context, userPrompt string, opts map[string]any) (string, error) {
+	if NormalizeBackend(string(c.Backend)) == BackendFreebuff {
+		maxTok := 800
+		if opts != nil {
+			if v, ok := opts["num_predict"].(int); ok && v > 0 {
+				maxTok = v
+			}
+		}
+		return c.chatOpenAI(ctx, userPrompt, maxTok)
+	}
 	if opts == nil {
 		opts = batchOptions()
 	}

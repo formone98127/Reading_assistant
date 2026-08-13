@@ -35,22 +35,19 @@ function bookStatusLabel(b) {
   }
 }
 
-function exportMode() {
-  const el = $("export-mode");
-  return el?.value === "english" ? "english" : "english_chinese";
+function exportQueryString() {
+  const e = $("export-opt-easier")?.checked ?? true;
+  const c = $("export-opt-chinese")?.checked ?? false;
+  return `showEasier=${e}&showChinese=${c}`;
 }
 
 function bookSiteURL(bookId) {
-  const mode = exportMode();
   const base = `${location.origin}/book/${encodeURIComponent(bookId)}`;
-  return mode === "english_chinese" ? `${base}?mode=english_chinese` : base;
+  return `${base}?${exportQueryString()}`;
 }
 
 function downloadURL(bookId) {
-  const mode = exportMode();
-  let url = `/api/library/export?id=${encodeURIComponent(bookId)}`;
-  if (mode === "english_chinese") url += "&mode=english_chinese";
-  return url;
+  return `/api/library/export?id=${encodeURIComponent(bookId)}&${exportQueryString()}`;
 }
 
 async function copyText(text) {
@@ -145,13 +142,11 @@ async function loadBooks() {
 async function publishBook(bookId, btn) {
   const errEl = $("export-error");
   showError(errEl, "");
-  const mode = exportMode();
   const prev = btn.textContent;
   btn.disabled = true;
   btn.textContent = "Saving…";
   try {
-    let url = `/api/library/publish?id=${encodeURIComponent(bookId)}`;
-    if (mode === "english_chinese") url += "&mode=english_chinese";
+    const url = `/api/library/publish?id=${encodeURIComponent(bookId)}&${exportQueryString()}`;
     const res = await fetch(url, { method: "POST" });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
@@ -176,5 +171,6 @@ window.addEventListener("error", (e) => {
 });
 
 $("btn-refresh-books")?.addEventListener("click", () => loadBooks());
-$("export-mode")?.addEventListener("change", () => loadBooks());
+$("export-opt-easier")?.addEventListener("change", () => loadBooks());
+$("export-opt-chinese")?.addEventListener("change", () => loadBooks());
 loadBooks().catch((e) => showError($("export-error"), e?.message || String(e)));

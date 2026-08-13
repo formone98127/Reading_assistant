@@ -10,6 +10,11 @@ import (
 
 func TestEffectiveExportReadingMode(t *testing.T) {
 	if got := EffectiveExportReadingMode(session.ModeEnglish, []ReaderSentence{
+		{Original: "Hi", Chinese: "你好", Levels: []string{"Hello"}},
+	}); got != session.ModeEasierChinese {
+		t.Fatalf("got %q want easier_chinese", got)
+	}
+	if got := EffectiveExportReadingMode(session.ModeEnglish, []ReaderSentence{
 		{Original: "Hi", Chinese: "你好"},
 	}); got != session.ModeEnglishChinese {
 		t.Fatalf("got %q want english_chinese", got)

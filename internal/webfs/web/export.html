@@ -11,18 +11,17 @@
   <div id="export-app">
     <header class="export-header">
       <a href="/" class="export-back">← Reading Assistant</a>
+      <p class="hint"><a href="/public.html">Public upload →</a></p>
       <h1>Export books</h1>
       <p class="hint">Each book can be opened as a local website or downloaded as a single offline HTML file.</p>
     </header>
 
     <section class="export-controls">
-      <label class="export-mode-label">
-        <span>Export / site mode</span>
-        <select id="export-mode" class="export-mode-select">
-          <option value="english_chinese">English + 中文 (→ shows 中文)</option>
-          <option value="english">English only (original + easier 1–3)</option>
-        </select>
-      </label>
+      <fieldset class="reading-options export-reading-options">
+        <legend>Reader version</legend>
+        <label class="reading-opt"><input type="checkbox" id="export-opt-easier" checked /> Easier (levels 1–3)</label>
+        <label class="reading-opt"><input type="checkbox" id="export-opt-chinese" /> 中文</label>
+      </fieldset>
       <button type="button" id="btn-refresh-books" class="btn-ghost">Refresh list</button>
     </section>
 
@@ -40,8 +39,5 @@
     </section>
   </div>
   <script src="/export.js"></script>
-  <noscript>
-    <p class="error" style="padding:1rem">JavaScript is required for the book list. Enable JS and reload.</p>
-  </noscript>
 </body>
 </html>

@@ -1,6 +1,7 @@
 package library
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 
@@ -10,34 +11,54 @@ import (
 
 // HTMLExport builds a shareable interactive HTML reader for a library book.
 func (s *Store) HTMLExport(bookID string) (filename string, content []byte, err error) {
-	return s.HTMLExportBook(bookID, "")
+	return s.HTMLExportBook(bookID, "", "", "")
 }
 
-// HTMLExportBook builds export HTML. modeOverride is optional (english / english_chinese).
-func (s *Store) HTMLExportBook(bookID string, modeOverride string) (filename string, content []byte, err error) {
+// HTMLExportBook builds export HTML. Query overrides: mode (legacy) or showEasier/showChinese.
+func (s *Store) HTMLExportBook(bookID, modeOverride, showEasierQ, showChineseQ string) (filename string, content []byte, err error) {
 	meta, err := s.LoadMeta(bookID)
 	if err != nil {
 		return "", nil, err
 	}
-	sentences, err := s.LoadSentences(bookID)
+	book, err := s.LoadBook(bookID)
 	if err != nil {
 		return "", nil, err
 	}
-	prepared, err := s.LoadPrepared(bookID)
+	opts := meta.ResolvedOptions()
+	if showEasierQ != "" || showChineseQ != "" {
+		e := showEasierQ == "true" || showEasierQ == "1"
+		c := showChineseQ == "true" || showChineseQ == "1"
+		opts = session.ReadingOptions{ShowEasier: e, ShowChinese: c}
+	} else if modeOverride == session.TrackEasier || modeOverride == session.TrackChinese || modeOverride == session.TrackOriginal {
+		opts = session.OptionsFromTrack(modeOverride)
+	} else if modeOverride != "" {
+		opts = session.OptionsFromMode(modeOverride)
+	}
+	sentencesOut := book.Sentences
+	if meta.TTSEnabled {
+		for i := range sentencesOut {
+			if !s.HasAudio(bookID, i) {
+				continue
+			}
+			wav, err := s.LoadAudio(bookID, i)
+			if err != nil || len(wav) == 0 {
+				continue
+			}
+			sentencesOut[i].Audio = base64.StdEncoding.EncodeToString(wav)
+		}
+	}
+	opts = save.EffectiveExportOptions(opts, sentencesOut)
+	prog, err := s.LoadReadProgress(bookID)
 	if err != nil {
 		return "", nil, err
 	}
-	mode := meta.ReadingMode
-	if modeOverride != "" {
-		mode = session.NormalizeReadingMode(modeOverride)
-	}
-	sentencesOut := save.BuildReaderSentences(sentences, prepared.English, prepared.Chinese, session.MaxLevel)
 	content, err = save.BuildBookHTML(save.ReaderExport{
 		Title:       meta.Title,
-		StartIndex:  meta.ReadIndex,
-		StartLevel:  meta.ReadLevel,
+		StartIndex:  prog.Index,
+		StartLevel:  prog.Level,
 		MaxLevel:    session.MaxLevel,
-		ReadingMode: save.EffectiveExportReadingMode(mode, sentencesOut),
+		ReadingMode: session.ModeFromOptions(opts),
+		TTSEnabled:  meta.TTSEnabled,
 		Sentences:   sentencesOut,
 	})
 	if err != nil {
@@ -47,8 +68,8 @@ func (s *Store) HTMLExportBook(bookID string, modeOverride string) (filename str
 }
 
 // PublishHTML writes a standalone reader site into the book bundle (reader.html).
-func (s *Store) PublishHTML(bookID string, modeOverride string) (string, error) {
-	_, data, err := s.HTMLExportBook(bookID, modeOverride)
+func (s *Store) PublishHTML(bookID, modeOverride, showEasierQ, showChineseQ string) (string, error) {
+	_, data, err := s.HTMLExportBook(bookID, modeOverride, showEasierQ, showChineseQ)
 	if err != nil {
 		return "", err
 	}
